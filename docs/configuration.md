@@ -24,11 +24,11 @@ The bridge is configured with environment variables.
 Example with explicit hidraw and verbose report logging:
 
 ```sh
-MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 cargo run --release
+MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 ./target/release/monsgeek-linux-bridge
 ```
 
 Focused calibration/simulation logging:
 
 ```sh
-MONSGEEK_TRACE_FOCUS=1 cargo run --release
+MONSGEEK_TRACE_FOCUS=1 ./target/release/monsgeek-linux-bridge
 ```

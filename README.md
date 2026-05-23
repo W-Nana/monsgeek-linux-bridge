@@ -51,10 +51,10 @@ actual ACL. Use `--no-group` if you want to rely only on `uaccess`.
 
 Replug the keyboard after installing the rule.
 
-Build and start the local connector:
+Start the local connector:
 
 ```sh
-cargo run --release
+./target/release/monsgeek-linux-bridge
 ```
 
 Open the official web driver:
@@ -80,7 +80,7 @@ Expected result: all 21 methods return HTTP 200 and `grpc-status: 0`.
 For a dry API-only smoke test without a real hidraw device:
 
 ```sh
-MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null cargo run --release
+MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null ./target/release/monsgeek-linux-bridge
 MONSGEEK_HIDRAW=/dev/null node tools/grpc-smoke-test.mjs
 ```
 
@@ -113,8 +113,8 @@ udev/99-monsgeek-hidraw.rules  udev rule for 3151:502d
 Useful subcommands:
 
 ```sh
-cargo run --release -- --help
-cargo run --release -- print-udev-rule
+./target/release/monsgeek-linux-bridge --help
+./target/release/monsgeek-linux-bridge print-udev-rule
 sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
