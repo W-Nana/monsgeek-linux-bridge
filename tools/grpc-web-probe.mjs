@@ -850,7 +850,7 @@ function magnetTravelReportOffset(report) {
 
 function isMagnetReportForwardingActive() {
   return [...deviceStates.values()].some(
-    (state) => state.magnetismReport.active || Date.now() <= state.calibration.inputActiveUntil,
+    (state) => state.magnetismReport.active && !state.calibration.inputReportOwned,
   );
 }
 
@@ -861,21 +861,22 @@ function shouldForwardVendorInputReport(report) {
 
 function cachedCalibrationInputPayload(state, payload) {
   const query = state.lastMagnetismRead;
+  const cleanPayload = isCalibrationControlEcho(payload) ? Buffer.alloc(payload.length) : payload;
   if (
     !CALIBRATION_INPUT_CACHE ||
     !query ||
     query.kind !== MAGNETISM_TRAVEL_VALUES ||
-    payload.length < 2 ||
+    cleanPayload.length < 2 ||
     Date.now() > state.calibration.inputActiveUntil
   ) {
-    return payload;
+    return cleanPayload;
   }
 
   const page = Math.max(0, Math.min(3, query.page ?? 0));
-  const nextPayload = Buffer.from(payload);
+  const nextPayload = Buffer.from(cleanPayload);
   let changed = false;
   const baseKey = page * CALIBRATION_KEYS_PER_PAGE;
-  const slots = Math.min(CALIBRATION_KEYS_PER_PAGE, Math.floor(payload.length / 2));
+  const slots = Math.min(CALIBRATION_KEYS_PER_PAGE, Math.floor(cleanPayload.length / 2));
   for (let slot = 0; slot < slots; slot += 1) {
     const offset = slot * 2;
     const cached = state.calibration.inputMax[baseKey + slot];
@@ -883,7 +884,7 @@ function cachedCalibrationInputPayload(state, payload) {
       continue;
     }
 
-    const raw = payload.readUInt16LE(offset);
+    const raw = cleanPayload.readUInt16LE(offset);
     if (cached > raw) {
       nextPayload.writeUInt16LE(cached, offset);
       changed = true;
@@ -894,7 +895,11 @@ function cachedCalibrationInputPayload(state, payload) {
     focusTrace(`calibration input cache page=${page} ${hidTrace(nextPayload)}`);
     return nextPayload;
   }
-  return payload;
+  return cleanPayload;
+}
+
+function isCalibrationControlEcho(payload) {
+  return payload.length >= 2 && payload[0] === FEA_CMD_SET_MAGNETISM_REPORT && (payload[1] === 0 || payload[1] === 1);
 }
 
 function monotonicCalibrationPayload(state, payload) {
