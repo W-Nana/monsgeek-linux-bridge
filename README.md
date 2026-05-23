@@ -158,7 +158,7 @@ The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
 | `getWeather` | Synthetic by default, optional live fetch | Network helper only |
 | `watchSystemInfo` | Implemented as a live gRPC-Web stream with Linux system data | Host telemetry only |
 | Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
-| `watchVender` | Implemented as a live gRPC-Web stream with official UI-compatible event bytes | Mirrors bridge-known light/calibration events; cannot synthesize physical key events |
+| `watchVender` | Implemented as a live gRPC-Web stream with official UI-compatible event bytes | Mirrors bridge-known light/calibration/simulation events |
 | `changeWirelessLoopStatus` | Acknowledged | Internal loop/lock control |
 | `cleanDev` | Acknowledged | Local connector state cleanup only |
 | `upgradeOTAGATT` | Refused by design | Not implemented |
@@ -221,7 +221,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
 - Simulation/vendor stream: the web UI consumes `VenderMsg.msg.slice(1, 4)`.
   The Linux bridge now emits the same shapes for start/stop (`0f 01 00` /
   `0f 00 00`), light changes (`04 xx 00`), and magnet travel notifications
-  (`1b xx 00`).
+  (`1b lo hi index`). When `setKeyMagnetismReport(true)` is active, the bridge
+  also emits a synthetic travel waveform so the Custom Actuation simulation
+  animation has a live data source even if the hardware-side vendor interrupt is
+  not exposed through Linux.
 - Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
   `Confirm` wrote a report beginning with `0a 00 53`.
 - FnSetting page: selected-key reset and restore used reports beginning with
@@ -231,7 +234,9 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   `0b 00 00 38`.
 - Calibration: the official UI read travel data with `e5` reports, asked for
   all physical keys to be pressed to the bottom, then sent a final `1e` report.
-  Repeated `e5 fe` polling stopped after confirmation.
+  Repeated `e5 fe` polling stopped after confirmation. During maximum
+  calibration mode, the Linux bridge keeps per-page travel values monotonic so
+  releasing a key does not reset the calibration UI.
 
 ## Safety Notes
 

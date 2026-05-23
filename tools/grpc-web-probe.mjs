@@ -37,9 +37,11 @@ const LIGHT_MUSIC2 = 0;
 const LIGHT_SCREEN = 1;
 const LIGHT_OTHER = 2;
 const FEA_CMD_SET_LEDPARAMS = new Set([0x04, 0x06, 0x07]);
+const FEA_CMD_SET_MAGNETISM_REPORT = 0x1b;
 const FEA_CMD_SET_MAGNETISM_CAL = 0x1c;
 const FEA_CMD_SET_MAGNETISM_CALMAX = 0x1e;
 const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
+const MAGNETISM_TRAVEL_VALUES = 0xfe;
 let microphoneMuted = false;
 const deviceStates = new Map();
 const streamClients = {
@@ -471,6 +473,12 @@ function stateFor(devicePath) {
         active: false,
         maximum: false,
         travelReads: 0,
+        maxPages: new Map(),
+      },
+      magnetismReport: {
+        active: false,
+        timer: undefined,
+        phase: 0,
       },
     });
   }
@@ -496,18 +504,100 @@ function updateWriteState(message, report) {
   if (FEA_CMD_SET_LEDPARAMS.has(report[0])) {
     state.lastLedParam = Buffer.from(report);
     broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x04, report[1] & 0xff, 0x00])));
+  } else if (report[0] === FEA_CMD_SET_MAGNETISM_REPORT) {
+    state.magnetismReport.active = report[1] !== 0;
+    if (state.magnetismReport.active) {
+      startMagnetismReport(message.devicePath, state);
+    } else {
+      stopMagnetismReport(state);
+      emitMagnetTravel(0, 0);
+    }
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_CAL) {
     state.calibration.active = report[1] !== 0;
+    if (state.calibration.active) {
+      state.calibration.maxPages.clear();
+    }
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_CALMAX) {
     state.calibration.maximum = report[1] !== 0;
   } else if (report[0] === FEA_CMD_GET_MAGNETISM_BY_ARR) {
     state.calibration.travelReads += 1;
-    broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x1b, report[3] & 0xff, 0x00])));
+    state.lastMagnetismRead = { kind: report[1], page: report[3] };
   }
 }
 
 function venderMessage(payload) {
   return payload.length > 0 ? protobufBytes(1, payload) : Buffer.alloc(0);
+}
+
+function emitMagnetTravel(travel, keyIndex = 0) {
+  const clampedTravel = Math.max(0, Math.min(0xffff, Math.round(travel)));
+  broadcastStream(
+    "watchVender",
+    venderMessage(
+      Buffer.from([
+        0x00,
+        FEA_CMD_SET_MAGNETISM_REPORT,
+        clampedTravel & 0xff,
+        (clampedTravel >> 8) & 0xff,
+        keyIndex & 0xff,
+      ]),
+    ),
+  );
+}
+
+function startMagnetismReport(devicePath, state) {
+  if (state.magnetismReport.timer) {
+    return;
+  }
+
+  state.magnetismReport.timer = setInterval(() => {
+    if (!state.magnetismReport.active) {
+      stopMagnetismReport(state);
+      return;
+    }
+
+    state.magnetismReport.phase = (state.magnetismReport.phase + 1) % 80;
+    const rising = state.magnetismReport.phase < 40;
+    const travel = rising ? state.magnetismReport.phase : 80 - state.magnetismReport.phase;
+    stateFor(devicePath).magnetismReport.phase = state.magnetismReport.phase;
+    emitMagnetTravel(travel, 0);
+  }, 50);
+}
+
+function stopMagnetismReport(state) {
+  if (state.magnetismReport.timer) {
+    clearInterval(state.magnetismReport.timer);
+    state.magnetismReport.timer = undefined;
+  }
+  state.magnetismReport.phase = 0;
+}
+
+function monotonicCalibrationPayload(state, payload) {
+  const query = state.lastMagnetismRead;
+  if (
+    !state.calibration.maximum ||
+    !query ||
+    query.kind !== MAGNETISM_TRAVEL_VALUES ||
+    payload.length < 2
+  ) {
+    return payload;
+  }
+
+  const page = query.page ?? 0;
+  const maxPayload = state.calibration.maxPages.get(page) ?? Buffer.alloc(payload.length);
+  const nextPayload = Buffer.from(payload);
+  for (let index = 0; index + 1 < payload.length; index += 2) {
+    const value = payload.readUInt16LE(index);
+    const maxValue = index + 1 < maxPayload.length ? maxPayload.readUInt16LE(index) : 0;
+    if (value > maxValue) {
+      maxPayload.writeUInt16LE(value, index);
+      nextPayload.writeUInt16LE(value, index);
+    } else {
+      nextPayload.writeUInt16LE(maxValue, index);
+    }
+  }
+  state.calibration.maxPages.set(page, maxPayload);
+  return nextPayload;
 }
 
 function venderLightPayload(light) {
@@ -868,8 +958,13 @@ async function responseFor(method, requestMessage) {
   if (method === "readMsg" || method === "readRawFeature") {
     const message = decodeReadMsg(requestMessage);
     try {
-      const payload = Buffer.from(featureIo(["read", message.devicePath || DEFAULT_HIDRAW]), "hex");
-      return { message: resRead(payload), note: `${method} ${hidTrace(payload)}` };
+      const rawPayload = Buffer.from(featureIo(["read", message.devicePath || DEFAULT_HIDRAW]), "hex");
+      const state = stateFor(message.devicePath);
+      const payload = monotonicCalibrationPayload(state, rawPayload);
+      return {
+        message: resRead(payload),
+        note: `${method} ${payload === rawPayload ? "" : "calibration-max "} ${hidTrace(payload)}`,
+      };
     } catch (error) {
       return { message: resRead(Buffer.alloc(0), error.message), note: `${method} failed: ${error.message}` };
     }
