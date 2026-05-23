@@ -221,11 +221,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
 - Simulation/vendor stream: the web UI consumes `VenderMsg.msg.slice(1, 4)`.
   The Linux bridge now emits the same shapes for start/stop (`0f 01 00` /
   `0f 00 00`), light changes (`04 xx 00`), and magnet travel notifications
-  (`1b lo hi index`). When `setKeyMagnetismReport(true)` is active, the bridge
-  also emits a synthetic travel waveform so the Custom Actuation simulation
-  animation has a live data source even if the hardware-side vendor interrupt is
-  not exposed through Linux. The synthetic travel ceiling defaults to `4000` and
-  can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
+  (`1b lo hi index`). Hardware-originated magnet travel events are forwarded
+  without synthetic replacement. A synthetic fallback can be enabled for UI
+  debugging with `MONSGEEK_SYNTHETIC_SIMULATION=1`; its ceiling defaults to
+  `400` and can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
 - Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
   `Confirm` wrote a report beginning with `0a 00 53`.
 - FnSetting page: selected-key reset and restore used reports beginning with
@@ -235,9 +234,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   `0b 00 00 38`.
 - Calibration: the official UI read travel data with `e5` reports, asked for
   all physical keys to be pressed to the bottom, then sent a final `1e` report.
-  Repeated `e5 fe` polling stopped after confirmation. During maximum
-  calibration mode, the Linux bridge keeps per-page travel values monotonic so
-  releasing a key does not reset the calibration UI.
+  Repeated `e5 fe` polling stopped after confirmation. During active maximum
+  calibration mode (`1e 01`), the Linux bridge keeps per-page travel values
+  monotonic so releasing a key does not reset the calibration UI; the cache is
+  cleared immediately on `1e 00` or `1c 00`.
 
 ## Safety Notes
 

@@ -42,7 +42,8 @@ const FEA_CMD_SET_MAGNETISM_CAL = 0x1c;
 const FEA_CMD_SET_MAGNETISM_CALMAX = 0x1e;
 const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
 const MAGNETISM_TRAVEL_VALUES = 0xfe;
-const SYNTHETIC_TRAVEL_MAX = Number.parseInt(process.env.MONSGEEK_SIM_TRAVEL_MAX ?? "4000", 10);
+const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
+const SYNTHETIC_TRAVEL_MAX = Number.parseInt(process.env.MONSGEEK_SIM_TRAVEL_MAX ?? "400", 10);
 let microphoneMuted = false;
 const deviceStates = new Map();
 const streamClients = {
@@ -507,7 +508,7 @@ function updateWriteState(message, report) {
     broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x04, report[1] & 0xff, 0x00])));
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_REPORT) {
     state.magnetismReport.active = report[1] !== 0;
-    if (state.magnetismReport.active) {
+    if (state.magnetismReport.active && SYNTHETIC_SIMULATION) {
       startMagnetismReport(message.devicePath, state);
     } else {
       stopMagnetismReport(state);
@@ -517,9 +518,16 @@ function updateWriteState(message, report) {
     state.calibration.active = report[1] !== 0;
     if (state.calibration.active) {
       state.calibration.maxPages.clear();
+    } else {
+      resetCalibrationState(state);
     }
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_CALMAX) {
     state.calibration.maximum = report[1] !== 0;
+    if (state.calibration.maximum) {
+      state.calibration.maxPages.clear();
+    } else {
+      resetCalibrationState(state);
+    }
   } else if (report[0] === FEA_CMD_GET_MAGNETISM_BY_ARR) {
     state.calibration.travelReads += 1;
     state.lastMagnetismRead = { kind: report[1], page: report[3] };
@@ -580,9 +588,18 @@ function stopMagnetismReport(state) {
   state.magnetismReport.phase = 0;
 }
 
+function resetCalibrationState(state) {
+  state.calibration.active = false;
+  state.calibration.maximum = false;
+  state.calibration.travelReads = 0;
+  state.calibration.maxPages.clear();
+  state.lastMagnetismRead = undefined;
+}
+
 function monotonicCalibrationPayload(state, payload) {
   const query = state.lastMagnetismRead;
   if (
+    !state.calibration.maximum ||
     !query ||
     query.kind !== MAGNETISM_TRAVEL_VALUES ||
     payload.length < 2
