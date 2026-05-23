@@ -1,153 +1,52 @@
-# MonsGeek Linux connector notes
+# monsgeek-linux-bridge
 
-This workspace contains the official macOS `iot_v189.dmg` and a Linux
-gRPC-Web/HID bridge probe for the legacy web driver.
-
-## Current findings
-
-- `web.monsgeek.com` uses gRPC-Web against `http://127.0.0.1:3814`.
-- The macOS package launches a Rust `iot_driver` local bridge for that port.
-- The connected MonsGeek keyboard is visible on Linux as USB `3151:502d`.
-- The vendor configuration HID interface is a 64-byte Feature Report hidraw
-  endpoint: interface 2 and usage page `0xffff` on the current FUN60 PRO. The
-  bridge detects the matching Linux endpoint from sysfs; it was `hidraw4` in
-  the test environment.
-
-## macOS driver reverse-engineering notes
-
-`iot_v189.dmg` contains `iotdriver.app` with a tray launcher
-`Contents/MacOS/rust-iot-tray` and the real connector binary
-`Contents/Resources/iot_driver`. Both are x86_64 Mach-O executables. The tray
-launcher only starts `iot_driver`; the connector is a user-space Rust service
-using tonic gRPC-Web on `127.0.0.1:3814`, not a kernel driver.
-
-The macOS connector binary keeps Rust symbols and source-path strings. Those
-symbols confirm the major local modules: `grpc_server`, `dj_dev_manger`,
-`dj_dev_api`, `dj_hid_device`, `ble_upgrade`, `dj_sound`, `dj_screen`,
-`system_info`, and `get_weather`. The imports and strings show HIDAPI for USB
-feature reports, CoreBluetooth/btleplug for BLE OTA/GATT, CPAL/CoreAudio for
-audio spectrum/mic-related helpers, `scrap`-style screen capture support, sled
-for a local key/value DB, and reqwest for weather HTTP.
-
-| Function area | Linux bridge status | macOS reverse evidence | Hardware effect assessment |
-| --- | --- | --- | --- |
-| `watchDevList` | Implemented | mac symbols include `DJDeviceManger::refresh_dev_list`, HIDAPI, `SupportDev`, `vid`, `pid`, `usage`, and `hid_raw_path` | Real local device enumeration |
-| `sendMsg` / `readMsg` | Implemented and verified on FUN60 PRO | mac symbols include `DJDevApi::send_msg`, `read_msg`, `send_msg_by_dev_path`, `read_msg_by_dev_path`; strings show `fb wait write/read` | Real 64-byte USB HID feature-report I/O |
-| `sendRawFeature` / `readRawFeature` | Implemented | same HIDAPI/raw feature path as above | Real USB HID feature-report I/O |
-| Lighting writes | Implemented through `sendMsg`; `setLightType` ack-compatible | mac binary has `setLightType` RPC but also the string `LIGHT TYPE == not yet implemented`; real light traffic is in `handle_light` and device API writes | Hardware effect comes from follow-up HID reports, not from `setLightType` alone |
-| Main remap / Fn remap / macro assignment | Implemented and verified | mac binary exposes command names such as `FEA_CMD_SET_KEYMATRIX`, `FEA_CMD_SET_MACRO`, `FEA_CMD_GET_MACRO` | Real HID writes, verified on current keyboard |
-| Calibration | Implemented through existing HID read/write flow; verified full UI flow | mac binary exposes generic HID report paths, no separate calibration RPC is present in the 21-method service | Real HID reports; observed `e5 fe` polling and final `1e` report |
-| Local DB methods | Implemented as JSON DB | mac binary links sled and exposes `insertDb`, `getItemFromDb`, `getAllKeysFromDb`, `getAllValuesFromDb`, `deleteItemFromDb` | Local connector persistence only, not direct keyboard hardware |
-| `getWeather` | Compatible response; optional live fetch with `MONSGEEK_LIVE_WEATHER=1` | mac binary contains `src/get_weather.rs`, reqwest, and `http://w2.yiketianqi.com/?version=day&unit=m&language=&query=&appid=48129135&appsecret=6Zojc6j0` | Network helper only; no keyboard hardware effect |
-| `watchSystemInfo` | Implemented with Linux system data | mac binary contains `src/system_info/mod.rs`, `SystemInfoManger::get`, and system strings such as `machdep.cpu.vendor` | Host system telemetry only; no keyboard hardware effect |
-| Microphone methods | API-compatible in-memory state | mac binary links AudioUnit/CoreAudio and has `dj_sound`, `CpalSound`, `ToggleMicrophoneMute` strings | mac side is an OS/audio helper; no evidence it writes the keyboard on this path |
-| `watchVender` | Empty compatible stream event | mac symbols include `start_watch_vender`, `handle_vender`, broadcast channels, and `VenderMsg` variants `Music1`, `Music2`, `Screen`, `ToggleMicrophoneMute`, `StartLightSwitch`, `ProfileSwitch`, `ResetSystemSwitch` | Real vendor-event stream exists on mac; Linux bridge does not yet mirror async vendor events |
-| `changeWirelessLoopStatus` | Acknowledged | mac symbols include `LOCK_WIRELESS_LOOP`, `get_wireless_lock_status`, and `set_lock_all_dev` | Internal loop/lock control; no direct HID write evidence from the RPC alone |
-| `cleanDev` | Acknowledged without persistence | mac symbols include `DJDeviceManger::clean_dev`, `clean_all_vendor`, and strings `CLEAN DEV` / `CLEAN ALL VENDOR` | Clears local connector device/vendor state; not a keyboard programming operation |
-| `upgradeOTAGATT` | Guarded and refused | mac binary contains `src/ble_upgrade/mod.rs`, CoreBluetooth/btleplug, GATT UUIDs, `RY KB OTA`, and success/checksum strings | Real BLE/GATT firmware flashing path on mac; intentionally not implemented on Linux bridge |
-
-## Probes
-
-List Linux HID endpoints without touching the device:
-
-```sh
-node tools/hid-sysfs-probe.mjs
-```
-
-Start a local gRPC-Web probe for the legacy web driver:
-
-```sh
-node tools/grpc-web-probe.mjs
-```
-
-Run a repeatable smoke test against a running bridge:
-
-```sh
-node tools/grpc-smoke-test.mjs
-```
-
-The gRPC-Web probe answers the connector version check, reports the local
-`3151:502d` keyboard to the device stream, and forwards the confirmed
-feature-report send/read calls through the Linux helper. The device stream uses
-the driver's read-only `GET_INFOR` command (`0x8f`) to fetch the web driver
-device ID from the keyboard before emitting the device list; on the current
-keyboard that ID is `2304`. Set `MONSGEEK_DEVICE_ID` to override the detected ID
-while testing. Set `MONSGEEK_HIDRAW=/dev/hidrawN` when sysfs detection needs an
-override. The probe also acknowledges the webpage's wireless-loop call and
-keeps the web driver's byte-keyed local DB in
-`$XDG_STATE_HOME/monsgeek-linux-bridge/db.json` or
-`~/.local/state/monsgeek-linux-bridge/db.json`. Set `MONSGEEK_DB_FILE` to use a
-different DB file. It also permits Chrome's private-network preflight from
+Experimental Linux connector for the legacy MonsGeek web driver at
 `https://web.monsgeek.com`.
 
-The official web bundle currently exposes 21 `DriverGrpc` methods. The smoke
-test exercises all of them and expects HTTP 200 plus `grpc-status:0`. The
-confirmed local FUN60 PRO paths covered by the bridge are device discovery,
-`sendMsg`/`readMsg`, raw feature send/read, the byte-keyed DB calls used by
-macros, `setLightType`, wireless-loop acknowledgement, microphone mute state
-compatibility, weather response compatibility, and a Linux system-info stream
-event. `getWeather` returns an offline synthetic response by default; set
-`MONSGEEK_LIVE_WEATHER=1` to call the same weather endpoint found in the macOS
-connector and fall back to the offline payload on failure. `cleanDev` is
-acknowledged without persistence and unsupported future methods are logged.
+The official web driver expects a local `iot_driver` connector on
+`http://127.0.0.1:3814`. MonsGeek provides that connector for macOS, but not
+for Linux. This project implements a small Linux gRPC-Web bridge that speaks the
+same local API and forwards confirmed keyboard operations to the Linux HID
+feature-report interface.
 
-Set `MONSGEEK_TRACE_HID=1` when starting the probe to log whole 64-byte HID
-reports instead of the first eight bytes. The light page already exercises the
-write path: toggling the current `Dazzle` checkbox calls `setLightType` and then
-sends a `sendMsg` report beginning with `07 01 04 03`. On the current FUN60 PRO,
-the observed revertible toggle changed that report byte from `07` back to `08`
-while the probe forwarded both reports to the vendor HID interface.
+This is not an official MonsGeek project, and it is not a kernel driver. It is a
+user-space compatibility bridge for testing and development.
 
-The main-page remap flow also reaches the write path through the same bridge.
-Selecting the current `r_Ctrl` key, capturing `ArrowRight` in the `Remap` input,
-and pressing `Confirm` wrote a `sendMsg` report beginning with `0a 00 53` and
-restored the observed `r_Ctrl ->` mapping. The `Disable` action commits
-immediately instead of waiting for `Confirm`; use a selected-key `Reset` or
-reapply the prior remap before leaving a trace session that exercises it.
+## Status
 
-`FnSetting` reuses the same remap panel and existing bridge methods on the
-keyboard's Fn layer. Its selected-key reset and restore trace used `sendMsg`
-reports beginning with `10 00 00 53`: resetting the observed Fn-layer
-`r_Ctrl ->` mapping cleared that report's ArrowRight value, and capturing
-`ArrowRight` plus `Confirm` restored it.
+Tested with a MonsGeek FUN60 PRO visible on Linux as USB `3151:502d`.
 
-The Macro page does not add a connector method during editing. `Add`, toggling
-recording between `Record` and `Stop` without key events, and the macro
-assignment-mode checkbox stayed in the page. Saving an empty test macro against
-a temporary `MONSGEEK_DB_FILE` used `insertDb` for
-`web_driver/iot_db/macro` and produced no HID report; the default DB was left
-without that test macro.
+Working and hardware-verified on the current test keyboard:
 
-Assigning that temporary `Macro_1` from the main remap panel to the observed
-`r_Ctrl ->` key used the existing write bridge as well. `Confirm` sent a remap
-report beginning with `0a 00 53` for the key and an additional macro payload
-report beginning with `0b 00 00 38`; capturing `ArrowRight` and confirming it
-afterward restored the original `r_Ctrl ->` mapping.
+- Device discovery through `watchDevList`
+- 64-byte HID feature-report write/read through `sendMsg` and `readMsg`
+- Raw feature send/read compatibility
+- Lighting writes triggered by the official web UI
+- Main-layer remapping
+- Fn-layer remapping
+- Macro storage and macro assignment
+- Full calibration flow through the official web UI
+- Local DB methods used by the web driver
+- API-compatible responses for all 21 currently exposed `DriverGrpc` methods
 
-Opening Calibration reuses existing bridge calls rather than adding a connector
-method. The full FUN60 PRO calibration flow was exercised through the official
-UI: the page first reads travel data with `e5` reports, asks the user to press
-every physical key to the bottom, then `Confirm` exits the calibration overlay.
-The trace showed the expected repeated `e5 fe` polling and a final `1e` report;
-polling stopped after the confirmation returned to the main page.
+Implemented for API compatibility, but not confirmed as keyboard hardware
+operations:
 
-The visible Profile and Share pages reached account/cloud UI during this pass
-without exposing another confirmed local FUN60 PRO connector call. About showed
-firmware `ID2304_V309` and an Upgrade entry point. The bridge now has compatible
-responses for the microphone, weather, vendor, and system-info methods present
-in the official bundle.
+- Weather response
+- Linux system-info stream event
+- Microphone mute state compatibility
+- Empty vendor-event stream placeholder
+- Wireless-loop acknowledgement
+- `cleanDev` acknowledgement
 
-`upgradeOTAGATT` is intentionally guarded. It returns a valid `Progress`
-message with an error string and does not flash the keyboard. Set
-`MONSGEEK_ALLOW_OTA=1` only after implementing and reviewing a device-specific
-Linux OTA transport; with the flag set today, the bridge still refuses with a
-clear "not implemented" progress error instead of writing firmware bytes.
+Intentionally not implemented:
 
-Real feature-report traffic needs read/write access to the detected
-`/dev/hidrawN`. The workspace includes
-[udev/99-monsgeek-hidraw.rules](udev/99-monsgeek-hidraw.rules) for USB
-`3151:502d`. Install and reload it with root privileges, then replug the
-keyboard:
+- `upgradeOTAGATT` firmware flashing. The bridge returns a valid progress
+  response with an error string and does not write firmware bytes.
+
+## Quick Start
+
+Install the udev rule so your user can read and write the MonsGeek hidraw node:
 
 ```sh
 sudo install -m 0644 udev/99-monsgeek-hidraw.rules /etc/udev/rules.d/
@@ -155,29 +54,207 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-The rule uses mode `0666` for this prototype because this session received the
-`uaccess` tag without an ACL on `/dev/hidraw4`. Tighten it to a dedicated group
-after the connector path is working. On the current test machine it produces a
-read/write `hidraw4` node and the feature-report helper below reaches the
-keyboard.
+Replug the keyboard after installing the rule.
 
-Current Chrome builds may ask for local network access before the public
-`https://web.monsgeek.com` page can call the loopback bridge at
-`http://127.0.0.1:3814`. Denying that permission makes the page keep showing the
-driver-support download prompt even while this bridge is running.
-
-There is also a narrow feature-report test for the vendor HID interface. It only
-sends the driver's `GET_REV` query (`0x80`) before reading a reply:
+Inspect detected HID endpoints:
 
 ```sh
-gcc -Wall -Wextra -o /tmp/hid-feature-version tools/hid-feature-version.c
-/tmp/hid-feature-version /dev/hidraw4
+node tools/hid-sysfs-probe.mjs
 ```
 
-The bridge compiles its feature-report helper into `/tmp/hid-feature-io` on the
-first HID access when it is missing. `CC` selects another compiler and
-`MONSGEEK_FEATURE_IO` selects another helper path:
+Start the local connector:
 
 ```sh
 node tools/grpc-web-probe.mjs
 ```
+
+Open the official web driver:
+
+```text
+https://web.monsgeek.com
+```
+
+If Chrome asks for local network access, allow it. Without that permission the
+page may keep showing the driver download prompt even while this bridge is
+running.
+
+## Verification
+
+With the bridge running, execute the smoke test:
+
+```sh
+node tools/grpc-smoke-test.mjs
+```
+
+Expected result: all 21 methods return HTTP 200 and `grpc-status: 0`.
+
+For a dry API-only smoke test without a real hidraw device:
+
+```sh
+MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null node tools/grpc-web-probe.mjs
+MONSGEEK_HIDRAW=/dev/null node tools/grpc-smoke-test.mjs
+```
+
+The HID send/read methods will report ioctl errors inside their protobuf
+payloads, but the gRPC-Web compatibility surface should still pass.
+
+## Configuration
+
+The bridge is configured with environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MONSGEEK_HIDRAW` | auto-detected, fallback `/dev/hidraw4` | Override the Linux hidraw endpoint |
+| `MONSGEEK_DEVICE_ID` | read from keyboard with `GET_INFOR` | Override the web-driver device ID while testing |
+| `MONSGEEK_TRACE_HID` | unset | Set to `1` to log full 64-byte HID reports |
+| `MONSGEEK_DB_FILE` | `~/.local/state/monsgeek-linux-bridge/db.json` | Override the local JSON DB path |
+| `MONSGEEK_FEATURE_IO` | `/tmp/hid-feature-io` | Override the compiled C HID helper path |
+| `MONSGEEK_LIVE_WEATHER` | unset | Set to `1` to call the same weather endpoint found in the macOS connector |
+| `MONSGEEK_ALLOW_OTA` | unset | Reserved. OTA still refuses even when set today |
+
+Example with explicit hidraw and verbose report logging:
+
+```sh
+MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 node tools/grpc-web-probe.mjs
+```
+
+## How It Works
+
+The official web bundle calls a local gRPC-Web service at:
+
+```text
+http://127.0.0.1:3814/driver.DriverGrpc/<method>
+```
+
+This bridge implements that local service in Node.js. For real keyboard I/O, it
+uses a small C helper to issue Linux `HIDIOCSFEATURE` and `HIDIOCGFEATURE`
+ioctls against the vendor configuration hidraw endpoint.
+
+On the current FUN60 PRO, the vendor configuration endpoint is:
+
+- USB vendor/product: `3151:502d`
+- HID usage page: `0xffff`
+- Feature report size: 64 bytes
+- Observed interface: interface 2
+
+The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
+`MONSGEEK_HIDRAW=/dev/hidrawN` if auto-detection chooses the wrong node.
+
+## Feature Matrix
+
+| Area | Linux bridge status | Hardware effect |
+| --- | --- | --- |
+| Device discovery | Implemented | Real local device enumeration |
+| `sendMsg` / `readMsg` | Implemented and verified | Real USB HID feature-report I/O |
+| `sendRawFeature` / `readRawFeature` | Implemented | Real USB HID feature-report I/O |
+| Lighting writes | Implemented through HID reports | Real keyboard write |
+| `setLightType` RPC | Acknowledged | No standalone hardware effect confirmed |
+| Main remap | Implemented and verified | Real keyboard write |
+| Fn remap | Implemented and verified | Real keyboard write |
+| Macro DB editing | Implemented | Local DB only |
+| Macro assignment | Implemented and verified | Real keyboard write |
+| Calibration | Implemented and verified | Real keyboard read/write flow |
+| Local DB RPCs | Implemented as JSON DB | Local connector persistence only |
+| `getWeather` | Synthetic by default, optional live fetch | Network helper only |
+| `watchSystemInfo` | Implemented with Linux system data | Host telemetry only |
+| Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
+| `watchVender` | Empty compatibility event | Async vendor events not mirrored yet |
+| `changeWirelessLoopStatus` | Acknowledged | Internal loop/lock control |
+| `cleanDev` | Acknowledged | Local connector state cleanup only |
+| `upgradeOTAGATT` | Refused by design | Not implemented |
+
+## Reverse-Engineering Notes
+
+The official `iot_v189.dmg` contains `iotdriver.app` with two Mach-O binaries:
+
+- `Contents/MacOS/rust-iot-tray`
+- `Contents/Resources/iot_driver`
+
+`rust-iot-tray` is only a tray launcher. The real connector is
+`Contents/Resources/iot_driver`, an x86_64 Rust user-space service using tonic
+gRPC-Web on `127.0.0.1:3814`.
+
+The macOS connector keeps enough Rust symbols and strings to identify its
+major modules:
+
+- `grpc_server`
+- `dj_dev_manger`
+- `dj_dev_api`
+- `dj_hid_device`
+- `ble_upgrade`
+- `dj_sound`
+- `dj_screen`
+- `system_info`
+- `get_weather`
+
+Those symbols and imports show:
+
+- HIDAPI is used for USB feature reports.
+- CoreBluetooth/btleplug is used for BLE OTA/GATT.
+- CPAL/CoreAudio is used for audio-related helpers.
+- screen-capture support exists for screen/light features.
+- sled is used for local key/value persistence.
+- reqwest is used for weather HTTP requests.
+
+Useful macOS binary evidence:
+
+| API area | macOS evidence | Assessment |
+| --- | --- | --- |
+| HID write/read | `DJDevApi::send_msg`, `read_msg`, `send_msg_by_dev_path`, `read_msg_by_dev_path` | Real keyboard feature-report path |
+| Lighting | `handle_light`, `check_light_type`, plus `LIGHT TYPE == not yet implemented` for the RPC wrapper | Actual writes happen through HID reports, not `setLightType` alone |
+| Key matrix and macros | `FEA_CMD_SET_KEYMATRIX`, `FEA_CMD_SET_MACRO`, `FEA_CMD_GET_MACRO` | Real keyboard configuration commands |
+| Weather | `src/get_weather.rs`, reqwest, `http://w2.yiketianqi.com/` URL | Network helper |
+| System info | `src/system_info/mod.rs`, `SystemInfoManger::get`, `machdep.cpu.vendor` | Host telemetry |
+| Microphone/audio | AudioUnit/CoreAudio imports, `dj_sound`, `CpalSound`, `ToggleMicrophoneMute` | OS/audio helper, not proven keyboard write |
+| Vendor stream | `start_watch_vender`, `handle_vender`, `VenderMsg` variants | Real async event stream on macOS |
+| Wireless loop | `LOCK_WIRELESS_LOOP`, `get_wireless_lock_status`, `set_lock_all_dev` | Internal connector lock/loop control |
+| Clean device | `DJDeviceManger::clean_dev`, `clean_all_vendor`, `CLEAN DEV` strings | Local connector state cleanup |
+| OTA | `src/ble_upgrade/mod.rs`, CoreBluetooth/btleplug, GATT UUIDs, `RY KB OTA` | Real BLE firmware flashing path; not ported |
+
+## Confirmed UI Flows
+
+These flows were exercised through the official web UI on the current FUN60 PRO:
+
+- Light page: toggling the current `Dazzle` checkbox called `setLightType` and
+  then sent a `sendMsg` report beginning with `07 01 04 03`. Reverting changed
+  the observed report byte from `07` back to `08`.
+- Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
+  `Confirm` wrote a report beginning with `0a 00 53`.
+- FnSetting page: selected-key reset and restore used reports beginning with
+  `10 00 00 53`.
+- Macro assignment: assigning a temporary `Macro_1` produced a remap report
+  beginning with `0a 00 53` and an additional macro payload beginning with
+  `0b 00 00 38`.
+- Calibration: the official UI read travel data with `e5` reports, asked for
+  all physical keys to be pressed to the bottom, then sent a final `1e` report.
+  Repeated `e5 fe` polling stopped after confirmation.
+
+## Safety Notes
+
+This bridge can write configuration reports to your keyboard. Use it only if
+you are comfortable testing experimental tooling against your device.
+
+OTA is deliberately blocked. Firmware flashing needs a device-specific Linux
+BLE/GATT implementation and review before it should be enabled.
+
+The included udev rule uses mode `0666` for this prototype because the test
+machine received the `uaccess` tag without an ACL on the hidraw node. For a
+multi-user machine, tighten the rule to a dedicated group.
+
+## Repository Contents
+
+```text
+tools/grpc-web-probe.mjs       local gRPC-Web connector
+tools/grpc-smoke-test.mjs      21-method API smoke test
+tools/hid-sysfs-probe.mjs      Linux hidraw/sysfs inspector
+tools/hid-feature-io.c         HID feature-report send/read helper
+tools/hid-feature-version.c    narrow GET_REV feature-report test
+udev/99-monsgeek-hidraw.rules  prototype udev rule for 3151:502d
+```
+
+## License and Disclaimer
+
+No license has been selected yet.
+
+This project is independent research and compatibility work. It is not
+affiliated with or endorsed by MonsGeek. Use at your own risk.
