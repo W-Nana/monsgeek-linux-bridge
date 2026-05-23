@@ -3,9 +3,13 @@
 import http from "node:http";
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -42,6 +46,8 @@ const FEA_CMD_SET_MAGNETISM_CAL = 0x1c;
 const FEA_CMD_SET_MAGNETISM_CALMAX = 0x1e;
 const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
 const MAGNETISM_TRAVEL_VALUES = 0xfe;
+const VENDOR_INPUT_READER = process.env.MONSGEEK_VENDOR_INPUT_READER !== "0";
+const CALIBRATION_HOLD = process.env.MONSGEEK_CALIBRATION_HOLD === "1";
 const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
 const SYNTHETIC_TRAVEL_MAX = Number.parseInt(process.env.MONSGEEK_SIM_TRAVEL_MAX ?? "400", 10);
 let microphoneMuted = false;
@@ -51,6 +57,7 @@ const streamClients = {
   watchVender: new Set(),
   watchSystemInfo: new Set(),
 };
+const vendorInputReaders = new Map();
 
 function readSysfsText(file) {
   try {
@@ -202,6 +209,62 @@ function attachStream(method, response, producer, intervalMs) {
 function broadcastStream(method, message) {
   for (const response of streamClients[method] ?? []) {
     writeGrpcWebMessage(response, message);
+  }
+}
+
+function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
+  if (!VENDOR_INPUT_READER || vendorInputReaders.has(devicePath)) {
+    return;
+  }
+
+  let fd;
+  try {
+    fd = openSync(devicePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    console.warn(`vendor input reader disabled for ${devicePath}: ${error.message}`);
+    return;
+  }
+
+  const buffer = Buffer.alloc(64);
+  const reader = {
+    fd,
+    timer: setInterval(() => {
+      for (;;) {
+        let bytesRead = 0;
+        try {
+          bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+        } catch (error) {
+          if (error.code === "EAGAIN" || error.code === "EWOULDBLOCK") {
+            break;
+          }
+          console.warn(`vendor input read failed for ${devicePath}: ${error.message}`);
+          break;
+        }
+        if (bytesRead <= 0) {
+          break;
+        }
+
+        const report = Buffer.from(buffer.subarray(0, bytesRead));
+        if (TRACE_HID_REPORTS) {
+          console.log(`vendor input ${devicePath} ${report.toString("hex")}`);
+        }
+        broadcastStream("watchVender", venderMessage(report));
+      }
+    }, 10),
+  };
+  vendorInputReaders.set(devicePath, reader);
+  console.log(`Started vendor input reader for ${devicePath}`);
+}
+
+function stopVendorInputReaders() {
+  for (const [devicePath, reader] of vendorInputReaders) {
+    clearInterval(reader.timer);
+    try {
+      closeSync(reader.fd);
+    } catch {
+      // File descriptor is already closed.
+    }
+    vendorInputReaders.delete(devicePath);
   }
 }
 
@@ -508,6 +571,9 @@ function updateWriteState(message, report) {
     broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x04, report[1] & 0xff, 0x00])));
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_REPORT) {
     state.magnetismReport.active = report[1] !== 0;
+    if (state.magnetismReport.active) {
+      startVendorInputReader(message.devicePath || DEFAULT_HIDRAW);
+    }
     if (state.magnetismReport.active && SYNTHETIC_SIMULATION) {
       startMagnetismReport(message.devicePath, state);
     } else {
@@ -599,6 +665,7 @@ function resetCalibrationState(state) {
 function monotonicCalibrationPayload(state, payload) {
   const query = state.lastMagnetismRead;
   if (
+    !CALIBRATION_HOLD ||
     !state.calibration.maximum ||
     !query ||
     query.kind !== MAGNETISM_TRAVEL_VALUES ||
@@ -1033,6 +1100,7 @@ const server = http.createServer((request, response) => {
     }
     if (method === "watchVender") {
       console.log(`${request.method} ${request.url} ${payload} -> vendor event stream`);
+      startVendorInputReader(DEFAULT_HIDRAW);
       attachStream(method, response, () => {
         const firstState = deviceStates.values().next().value;
         return venderMessage(firstState ? venderLightPayload(firstState.light) : Buffer.alloc(0));
@@ -1062,3 +1130,10 @@ server.listen(PORT, HOST, () => {
   console.log(`Using DB file ${DB_FILE}`);
   console.log(`Open ${WEB_ORIGIN} and watch which /driver.DriverGrpc calls arrive.`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    stopVendorInputReaders();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  });
+}

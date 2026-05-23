@@ -158,7 +158,7 @@ The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
 | `getWeather` | Synthetic by default, optional live fetch | Network helper only |
 | `watchSystemInfo` | Implemented as a live gRPC-Web stream with Linux system data | Host telemetry only |
 | Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
-| `watchVender` | Implemented as a live gRPC-Web stream with official UI-compatible event bytes | Mirrors bridge-known light/calibration/simulation events |
+| `watchVender` | Implemented as a live gRPC-Web stream plus Linux hidraw input reader | Mirrors bridge-known events and forwards hardware vendor/input events |
 | `changeWirelessLoopStatus` | Acknowledged | Internal loop/lock control |
 | `cleanDev` | Acknowledged | Local connector state cleanup only |
 | `upgradeOTAGATT` | Refused by design | Not implemented |
@@ -222,9 +222,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   The Linux bridge now emits the same shapes for start/stop (`0f 01 00` /
   `0f 00 00`), light changes (`04 xx 00`), and magnet travel notifications
   (`1b lo hi index`). Hardware-originated magnet travel events are forwarded
-  without synthetic replacement. A synthetic fallback can be enabled for UI
-  debugging with `MONSGEEK_SYNTHETIC_SIMULATION=1`; its ceiling defaults to
-  `400` and can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
+  from the hidraw input stream without synthetic replacement. Set
+  `MONSGEEK_VENDOR_INPUT_READER=0` to disable that reader. A synthetic fallback
+  can be enabled for UI debugging with `MONSGEEK_SYNTHETIC_SIMULATION=1`; its
+  ceiling defaults to `400` and can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
 - Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
   `Confirm` wrote a report beginning with `0a 00 53`.
 - FnSetting page: selected-key reset and restore used reports beginning with
@@ -234,10 +235,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   `0b 00 00 38`.
 - Calibration: the official UI read travel data with `e5` reports, asked for
   all physical keys to be pressed to the bottom, then sent a final `1e` report.
-  Repeated `e5 fe` polling stopped after confirmation. During active maximum
-  calibration mode (`1e 01`), the Linux bridge keeps per-page travel values
-  monotonic so releasing a key does not reset the calibration UI; the cache is
-  cleared immediately on `1e 00` or `1c 00`.
+  Repeated `e5 fe` polling stopped after confirmation. The experimental
+  read-payload max-hold shim is disabled by default because it can create ghost
+  travel values when the report layout is not confirmed; enable only for
+  diagnostics with `MONSGEEK_CALIBRATION_HOLD=1`.
 
 ## Safety Notes
 
