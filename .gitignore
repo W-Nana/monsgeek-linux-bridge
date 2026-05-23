@@ -1,0 +1,4 @@
+iot_v*.dmg
+*.log
+*.tmp
+node_modules/

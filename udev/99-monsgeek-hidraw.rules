@@ -1,0 +1,2 @@
+# MonsGeek vendor HID feature interface for the connected 3151:502d keyboard.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3151", ATTRS{idProduct}=="502d", MODE="0666", TAG+="uaccess"
