@@ -293,7 +293,9 @@ function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
           console.log(`vendor input ${devicePath} ${report.toString("hex")}`);
         }
         noteVendorInputReport(report);
-        broadcastStream("watchVender", venderMessage(report));
+        if (shouldForwardVendorInputReport(report)) {
+          broadcastStream("watchVender", venderMessage(report));
+        }
       }
     }, 10),
   };
@@ -807,12 +809,7 @@ function noteVendorInputReport(report) {
     return;
   }
 
-  const offset =
-    report.length >= 5 && report[1] === FEA_CMD_SET_MAGNETISM_REPORT
-      ? 1
-      : report.length >= 4 && report[0] === FEA_CMD_SET_MAGNETISM_REPORT
-        ? 0
-        : -1;
+  const offset = magnetTravelReportOffset(report);
   if (offset < 0) {
     return;
   }
@@ -839,6 +836,27 @@ function noteVendorInputReport(report) {
       focusTrace(`calibration input max key=${keyIndex} travel=${travel}`);
     }
   }
+}
+
+function magnetTravelReportOffset(report) {
+  if (report.length >= 5 && report[1] === FEA_CMD_SET_MAGNETISM_REPORT) {
+    return 1;
+  }
+  if (report.length >= 4 && report[0] === FEA_CMD_SET_MAGNETISM_REPORT) {
+    return 0;
+  }
+  return -1;
+}
+
+function isMagnetReportForwardingActive() {
+  return [...deviceStates.values()].some(
+    (state) => state.magnetismReport.active || Date.now() <= state.calibration.inputActiveUntil,
+  );
+}
+
+function shouldForwardVendorInputReport(report) {
+  const offset = magnetTravelReportOffset(report);
+  return offset < 0 || isMagnetReportForwardingActive();
 }
 
 function cachedCalibrationInputPayload(state, payload) {
