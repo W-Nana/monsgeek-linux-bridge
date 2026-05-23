@@ -224,7 +224,8 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   (`1b lo hi index`). When `setKeyMagnetismReport(true)` is active, the bridge
   also emits a synthetic travel waveform so the Custom Actuation simulation
   animation has a live data source even if the hardware-side vendor interrupt is
-  not exposed through Linux.
+  not exposed through Linux. The synthetic travel ceiling defaults to `4000` and
+  can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
 - Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
   `Confirm` wrote a report beginning with `0a 00 53`.
 - FnSetting page: selected-key reset and restore used reports beginning with

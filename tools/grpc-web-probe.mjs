@@ -42,6 +42,7 @@ const FEA_CMD_SET_MAGNETISM_CAL = 0x1c;
 const FEA_CMD_SET_MAGNETISM_CALMAX = 0x1e;
 const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
 const MAGNETISM_TRAVEL_VALUES = 0xfe;
+const SYNTHETIC_TRAVEL_MAX = Number.parseInt(process.env.MONSGEEK_SIM_TRAVEL_MAX ?? "4000", 10);
 let microphoneMuted = false;
 const deviceStates = new Map();
 const streamClients = {
@@ -556,9 +557,16 @@ function startMagnetismReport(devicePath, state) {
       return;
     }
 
-    state.magnetismReport.phase = (state.magnetismReport.phase + 1) % 80;
-    const rising = state.magnetismReport.phase < 40;
-    const travel = rising ? state.magnetismReport.phase : 80 - state.magnetismReport.phase;
+    state.magnetismReport.phase = (state.magnetismReport.phase + 1) % 140;
+    const phase = state.magnetismReport.phase;
+    let travel;
+    if (phase < 35) {
+      travel = Math.round((phase / 34) * SYNTHETIC_TRAVEL_MAX);
+    } else if (phase < 85) {
+      travel = SYNTHETIC_TRAVEL_MAX;
+    } else {
+      travel = Math.round(((139 - phase) / 54) * SYNTHETIC_TRAVEL_MAX);
+    }
     stateFor(devicePath).magnetismReport.phase = state.magnetismReport.phase;
     emitMagnetTravel(travel, 0);
   }, 50);
@@ -575,7 +583,6 @@ function stopMagnetismReport(state) {
 function monotonicCalibrationPayload(state, payload) {
   const query = state.lastMagnetismRead;
   if (
-    !state.calibration.maximum ||
     !query ||
     query.kind !== MAGNETISM_TRAVEL_VALUES ||
     payload.length < 2
