@@ -107,6 +107,7 @@ The bridge is configured with environment variables:
 | `MONSGEEK_HIDRAW` | auto-detected, fallback `/dev/hidraw4` | Override the Linux hidraw endpoint |
 | `MONSGEEK_DEVICE_ID` | read from keyboard with `GET_INFOR` | Override the web-driver device ID while testing |
 | `MONSGEEK_TRACE_HID` | unset | Set to `1` to log full 64-byte HID reports |
+| `MONSGEEK_TRACE_FOCUS` | unset | Set to `1` to log only vendor-input and magnet calibration/simulation events |
 | `MONSGEEK_DB_FILE` | `~/.local/state/monsgeek-linux-bridge/db.json` | Override the local JSON DB path |
 | `MONSGEEK_FEATURE_IO` | `/tmp/hid-feature-io` | Override the compiled C HID helper path |
 | `MONSGEEK_LIVE_WEATHER` | unset | Set to `1` to call the same weather endpoint found in the macOS connector |
@@ -116,6 +117,12 @@ Example with explicit hidraw and verbose report logging:
 
 ```sh
 MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 node tools/grpc-web-probe.mjs
+```
+
+Focused calibration/simulation logging:
+
+```sh
+MONSGEEK_TRACE_FOCUS=1 node tools/grpc-web-probe.mjs
 ```
 
 ## How It Works

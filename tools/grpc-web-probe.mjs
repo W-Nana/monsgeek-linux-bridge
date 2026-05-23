@@ -32,6 +32,7 @@ const DEFAULT_STATE_DIR = process.env.XDG_STATE_HOME ?? join(homedir(), ".local"
 const DB_FILE =
   process.env.MONSGEEK_DB_FILE ?? join(DEFAULT_STATE_DIR, "monsgeek-linux-bridge", "db.json");
 const TRACE_HID_REPORTS = process.env.MONSGEEK_TRACE_HID === "1";
+const TRACE_FOCUS = process.env.MONSGEEK_TRACE_FOCUS === "1";
 const LIVE_WEATHER = process.env.MONSGEEK_LIVE_WEATHER === "1";
 const WEATHER_ENDPOINT = "http://w2.yiketianqi.com/";
 const GET_INFOR = 0x8f;
@@ -58,6 +59,12 @@ const streamClients = {
   watchSystemInfo: new Set(),
 };
 const vendorInputReaders = new Map();
+
+function focusTrace(message) {
+  if (TRACE_FOCUS) {
+    console.log(`[focus] ${message}`);
+  }
+}
 
 function readSysfsText(file) {
   try {
@@ -245,7 +252,7 @@ function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
         }
 
         const report = Buffer.from(buffer.subarray(0, bytesRead));
-        if (TRACE_HID_REPORTS) {
+        if (TRACE_HID_REPORTS || TRACE_FOCUS) {
           console.log(`vendor input ${devicePath} ${report.toString("hex")}`);
         }
         broadcastStream("watchVender", venderMessage(report));
@@ -254,6 +261,7 @@ function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
   };
   vendorInputReaders.set(devicePath, reader);
   console.log(`Started vendor input reader for ${devicePath}`);
+  focusTrace(`watchVender input reader path=${devicePath}`);
 }
 
 function stopVendorInputReaders() {
@@ -571,6 +579,7 @@ function updateWriteState(message, report) {
     broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x04, report[1] & 0xff, 0x00])));
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_REPORT) {
     state.magnetismReport.active = report[1] !== 0;
+    focusTrace(`magnetism report ${state.magnetismReport.active ? "on" : "off"} path=${message.devicePath}`);
     if (state.magnetismReport.active) {
       startVendorInputReader(message.devicePath || DEFAULT_HIDRAW);
     }
@@ -582,6 +591,7 @@ function updateWriteState(message, report) {
     }
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_CAL) {
     state.calibration.active = report[1] !== 0;
+    focusTrace(`calibration ${state.calibration.active ? "on" : "off"} cmd=1c path=${message.devicePath}`);
     if (state.calibration.active) {
       state.calibration.maxPages.clear();
     } else {
@@ -589,6 +599,7 @@ function updateWriteState(message, report) {
     }
   } else if (report[0] === FEA_CMD_SET_MAGNETISM_CALMAX) {
     state.calibration.maximum = report[1] !== 0;
+    focusTrace(`calibration maximum ${state.calibration.maximum ? "on" : "off"} cmd=1e path=${message.devicePath}`);
     if (state.calibration.maximum) {
       state.calibration.maxPages.clear();
     } else {
@@ -597,6 +608,7 @@ function updateWriteState(message, report) {
   } else if (report[0] === FEA_CMD_GET_MAGNETISM_BY_ARR) {
     state.calibration.travelReads += 1;
     state.lastMagnetismRead = { kind: report[1], page: report[3] };
+    focusTrace(`magnetism read cmd=e5 kind=0x${report[1].toString(16)} page=${report[3]} path=${message.devicePath}`);
   }
 }
 
@@ -968,6 +980,9 @@ async function responseFor(method, requestMessage) {
     const state = stateFor(light.devicePath);
     state.light = light;
     broadcastStream("watchVender", venderMessage(venderLightPayload(light)));
+    focusTrace(
+      `setLightType ${lightTypeName(light.lightType)} screen=${light.screenId} dangle=${light.dangleDevType} path=${light.devicePath}`,
+    );
     return {
       message: Buffer.alloc(0),
       note: `setLightType ${lightTypeName(light.lightType)} screen=${light.screenId} dangle=${light.dangleDevType}`,
