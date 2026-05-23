@@ -117,9 +117,9 @@ The bridge is configured with environment variables:
 | `MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS` | `700` | Require a nearby boot-keyboard input report before accepting calibration travel |
 | `MONSGEEK_CALIBRATION_INPUT_STABILIZE_MS` | `180` | Ignore initial calibration vendor-input samples after entering calibration/max mode |
 | `MONSGEEK_CALIBRATION_INPUT_CONFIRM_MS` | `90` | Require a second same-key travel sample before accepting a calibration max update |
-| `MONSGEEK_MAC_SEND_SETTLE_MS` | `10` | macOS-driver-matched delay around feature writes |
-| `MONSGEEK_MAC_READ_POLL_MS` | `100` | macOS-driver-matched poll interval for transient calibration reads |
-| `MONSGEEK_MAC_READ_POLL_ATTEMPTS` | `15` | Maximum macOS-driver-matched retry count for transient calibration reads |
+| `MONSGEEK_MAC_SEND_SETTLE_MS` | `0` | Optional macOS-driver-observed delay around feature writes |
+| `MONSGEEK_MAC_READ_POLL_MS` | `0` | Optional macOS-driver-observed poll interval for transient calibration reads |
+| `MONSGEEK_MAC_READ_POLL_ATTEMPTS` | `1` | Optional retry count for transient calibration reads |
 | `MONSGEEK_ALLOW_OTA` | unset | Reserved. OTA still refuses even when set today |
 
 Example with explicit hidraw and verbose report logging:
@@ -227,13 +227,14 @@ Useful macOS binary evidence:
 | Clean device | `DJDeviceManger::clean_dev`, `clean_all_vendor`, `CLEAN DEV` strings | Local connector state cleanup |
 | OTA | `src/ble_upgrade/mod.rs`, CoreBluetooth/btleplug, GATT UUIDs, `RY KB OTA` | Real BLE firmware flashing path; not ported |
 
-The HID timing model has been partially replicated from the macOS binary. The
+The HID timing model has been partially identified from the macOS binary. The
 `DJDevice::send_read_msg` path marks the device as reading/sending, waits 10 ms,
 calls `send_msg`, waits another 10 ms, calls `read_msg`, then unsets the
 reading/sending marker. The write/read helpers also call `pasue24loop` for 24G
 state and `wait_fb_write_finish`, which polls `fb_24_check_status` every 100 ms
-for up to 15 attempts. The Linux bridge mirrors those observed timings for
-feature writes and transient calibration reads.
+for up to 15 attempts. Those timings are exposed as optional environment
+variables, but remain disabled by default because the Linux feature-report path
+is already synchronous and the extra wait is visible in the web UI.
 
 ## Confirmed UI Flows
 
@@ -261,9 +262,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   On Linux, the feature read can return zeros while the keyboard still emits
   real magnet travel on the vendor input hidraw stream. The bridge now keeps a
   short-lived per-key maximum from those hardware events while `e5 fe` polling
-  is active, requires two same-key samples before accepting a max update, feeds
-  that back through the paged `readMsg` response, and clears it when the polling
-  window ends. The older read-payload max-hold shim remains disabled by default;
+  is active, starts the vendor travel stream only after an actual boot-keyboard
+  press report, requires two same-key samples before accepting a max update,
+  feeds that back through the paged `readMsg` response, and clears it when the
+  polling window ends. The older read-payload max-hold shim remains disabled by default;
   enable only for diagnostics with
   `MONSGEEK_CALIBRATION_HOLD=1`.
 

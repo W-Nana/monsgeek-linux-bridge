@@ -58,9 +58,9 @@ const CALIBRATION_PHYSICAL_INPUT_GRACE_MS = Number.parseInt(
   process.env.MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS ?? "700",
   10,
 );
-const MAC_SEND_SETTLE_MS = Number.parseInt(process.env.MONSGEEK_MAC_SEND_SETTLE_MS ?? "10", 10);
-const MAC_READ_POLL_MS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_MS ?? "100", 10);
-const MAC_READ_POLL_ATTEMPTS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_ATTEMPTS ?? "15", 10);
+const MAC_SEND_SETTLE_MS = Number.parseInt(process.env.MONSGEEK_MAC_SEND_SETTLE_MS ?? "0", 10);
+const MAC_READ_POLL_MS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_MS ?? "0", 10);
+const MAC_READ_POLL_ATTEMPTS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_ATTEMPTS ?? "1", 10);
 const CALIBRATION_INPUT_STABILIZE_MS = Number.parseInt(
   process.env.MONSGEEK_CALIBRATION_INPUT_STABILIZE_MS ?? "180",
   10,
@@ -622,6 +622,7 @@ function stateFor(devicePath) {
         inputActiveUntil: 0,
         inputIgnoreUntil: 0,
         pendingInput: undefined,
+        devicePath: key,
         inputReportPath: undefined,
         inputReportOwned: false,
         inputReportTimer: undefined,
@@ -672,6 +673,7 @@ function updateWriteState(message, report) {
     focusTrace(`calibration ${state.calibration.active ? "on" : "off"} cmd=1c path=${message.devicePath}`);
     if (state.calibration.active) {
       resetCalibrationCache(state);
+      physicalKeyboardInputActiveUntil = 0;
       state.calibration.inputIgnoreUntil = Date.now() + CALIBRATION_INPUT_STABILIZE_MS;
     } else {
       resetCalibrationState(state);
@@ -681,6 +683,7 @@ function updateWriteState(message, report) {
     focusTrace(`calibration maximum ${state.calibration.maximum ? "on" : "off"} cmd=1e path=${message.devicePath}`);
     if (state.calibration.maximum) {
       resetCalibrationCache(state);
+      physicalKeyboardInputActiveUntil = 0;
       state.calibration.inputIgnoreUntil = Date.now() + CALIBRATION_INPUT_STABILIZE_MS;
     } else {
       resetCalibrationState(state);
@@ -774,7 +777,7 @@ function noteCalibrationTravelRead(state, kind, devicePath) {
     state.calibration.inputMax.fill(0);
   }
   state.calibration.inputActiveUntil = now + CALIBRATION_INPUT_CACHE_TTL_MS;
-  ensureCalibrationInputReport(state, devicePath);
+  state.calibration.devicePath = devicePath || DEFAULT_HIDRAW;
 }
 
 function calibrationReportPayload(enabled) {
@@ -898,7 +901,18 @@ function notePhysicalKeyboardInput(report) {
   }
 
   const hasPressedKey = report.some((byte) => byte !== 0);
-  physicalKeyboardInputActiveUntil = hasPressedKey ? Date.now() + CALIBRATION_PHYSICAL_INPUT_GRACE_MS : 0;
+  const now = Date.now();
+  physicalKeyboardInputActiveUntil = hasPressedKey ? now + CALIBRATION_PHYSICAL_INPUT_GRACE_MS : 0;
+
+  if (!hasPressedKey) {
+    return;
+  }
+
+  for (const state of deviceStates.values()) {
+    if (now <= state.calibration.inputActiveUntil) {
+      ensureCalibrationInputReport(state, state.calibration.devicePath || DEFAULT_HIDRAW);
+    }
+  }
 }
 
 function isBootKeyboardInputReport(report) {
