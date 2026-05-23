@@ -1,16 +1,32 @@
 # monsgeek-linux-bridge
 
-Experimental Linux connector for the legacy MonsGeek web driver at
+Rust Linux connector for the legacy MonsGeek web driver at
 `https://web.monsgeek.com`.
 
 The official web driver expects a local `iot_driver` connector on
 `http://127.0.0.1:3814`. MonsGeek provides that connector for macOS, but not
-for Linux. This project implements a small Linux gRPC-Web bridge that speaks the
-same local API and forwards confirmed keyboard operations to the Linux HID
+for Linux. This project implements a Linux gRPC-Web bridge that speaks the same
+local API and forwards confirmed keyboard operations to the Linux HID
 feature-report interface.
 
 This is not an official MonsGeek project, and it is not a kernel driver. It is a
-user-space compatibility bridge for testing and development.
+user-space compatibility bridge.
+
+## Rust Rewrite
+
+The stable connector is now the Rust binary in `src/main.rs`.
+
+The earlier Node.js prototype remains in `tools/grpc-web-probe.mjs` as a
+reference and fallback while more keyboards are tested, but it is no longer the
+preferred runtime. The Rust bridge removes the two biggest prototype shortcuts:
+
+- HID feature reports are handled in-process with Linux `HIDIOCSFEATURE` and
+  `HIDIOCGFEATURE` ioctls. There is no per-request fork/exec C helper, no
+  command-line hex transport, and no binary-to-string-to-binary conversion.
+- Vendor/input events are read through Tokio `AsyncFd`, so the process waits on
+  kernel readiness instead of polling hidraw every 10 ms with synchronous reads.
+  `watchVender` keeps a real gRPC-Web text stream open and broadcasts
+  hardware-originated simulation/calibration events to subscribed web clients.
 
 ## Status
 
@@ -62,10 +78,10 @@ Inspect detected HID endpoints:
 node tools/hid-sysfs-probe.mjs
 ```
 
-Start the local connector:
+Build and start the local connector:
 
 ```sh
-node tools/grpc-web-probe.mjs
+cargo run --release
 ```
 
 Open the official web driver:
@@ -91,7 +107,7 @@ Expected result: all 21 methods return HTTP 200 and `grpc-status: 0`.
 For a dry API-only smoke test without a real hidraw device:
 
 ```sh
-MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null node tools/grpc-web-probe.mjs
+MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null cargo run --release
 MONSGEEK_HIDRAW=/dev/null node tools/grpc-smoke-test.mjs
 ```
 
@@ -110,8 +126,6 @@ The bridge is configured with environment variables:
 | `MONSGEEK_TRACE_HID` | unset | Set to `1` to log full 64-byte HID reports |
 | `MONSGEEK_TRACE_FOCUS` | unset | Set to `1` to log only vendor-input and magnet calibration/simulation events |
 | `MONSGEEK_DB_FILE` | `~/.local/state/monsgeek-linux-bridge/db.json` | Override the local JSON DB path |
-| `MONSGEEK_FEATURE_IO` | `/tmp/hid-feature-io` | Override the compiled C HID helper path |
-| `MONSGEEK_LIVE_WEATHER` | unset | Set to `1` to call the same weather endpoint found in the macOS connector |
 | `MONSGEEK_CALIBRATION_INPUT_CACHE` | `1` | Cache hardware magnet travel events while `e5 fe` calibration reads are active |
 | `MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS` | `2500` | Time window for calibration travel max retention after the last `e5 fe` poll |
 | `MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS` | `700` | Require a nearby boot-keyboard input report before accepting calibration travel |
@@ -126,13 +140,13 @@ The bridge is configured with environment variables:
 Example with explicit hidraw and verbose report logging:
 
 ```sh
-MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 node tools/grpc-web-probe.mjs
+MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 cargo run --release
 ```
 
 Focused calibration/simulation logging:
 
 ```sh
-MONSGEEK_TRACE_FOCUS=1 node tools/grpc-web-probe.mjs
+MONSGEEK_TRACE_FOCUS=1 cargo run --release
 ```
 
 ## How It Works
@@ -143,9 +157,10 @@ The official web bundle calls a local gRPC-Web service at:
 http://127.0.0.1:3814/driver.DriverGrpc/<method>
 ```
 
-This bridge implements that local service in Node.js. For real keyboard I/O, it
-uses a small C helper to issue Linux `HIDIOCSFEATURE` and `HIDIOCGFEATURE`
-ioctls against the vendor configuration hidraw endpoint.
+This bridge implements that local service in Rust. For real keyboard I/O, it
+issues Linux `HIDIOCSFEATURE` and `HIDIOCGFEATURE` ioctls directly against the
+vendor configuration hidraw endpoint. Vendor/input reports are consumed through
+an event-driven `AsyncFd` reader.
 
 On the current FUN60 PRO, the vendor configuration endpoint is:
 
@@ -172,7 +187,7 @@ The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
 | Macro assignment | Implemented and verified | Real keyboard write |
 | Calibration | Implemented and verified | Real keyboard read/write flow |
 | Local DB RPCs | Implemented as JSON DB | Local connector persistence only |
-| `getWeather` | Synthetic by default, optional live fetch | Network helper only |
+| `getWeather` | Synthetic compatibility response | Network helper only |
 | `watchSystemInfo` | Implemented as a live gRPC-Web stream with Linux system data | Host telemetry only |
 | Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
 | `watchVender` | Implemented as a live gRPC-Web stream plus Linux hidraw input reader | Mirrors bridge-known events and forwards hardware vendor/input events |
@@ -278,19 +293,21 @@ you are comfortable testing experimental tooling against your device.
 OTA is deliberately blocked. Firmware flashing needs a device-specific Linux
 BLE/GATT implementation and review before it should be enabled.
 
-The included udev rule uses mode `0666` for this prototype because the test
-machine received the `uaccess` tag without an ACL on the hidraw node. For a
-multi-user machine, tighten the rule to a dedicated group.
+The included udev rule uses `MODE="0660"` with `TAG+="uaccess"`, allowing the
+active local seat user to access the keyboard hidraw node without making it
+world-readable. If your distro does not apply `uaccess` ACLs, create a dedicated
+group and add `GROUP="your-group"` to the rule instead of relaxing it to `0666`.
 
 ## Repository Contents
 
 ```text
-tools/grpc-web-probe.mjs       local gRPC-Web connector
+src/main.rs                    Rust local gRPC-Web connector
 tools/grpc-smoke-test.mjs      21-method API smoke test
+tools/grpc-web-probe.mjs       legacy Node.js prototype / fallback connector
 tools/hid-sysfs-probe.mjs      Linux hidraw/sysfs inspector
-tools/hid-feature-io.c         HID feature-report send/read helper
+tools/hid-feature-io.c         legacy prototype HID feature-report helper
 tools/hid-feature-version.c    narrow GET_REV feature-report test
-udev/99-monsgeek-hidraw.rules  prototype udev rule for 3151:502d
+udev/99-monsgeek-hidraw.rules  udev rule for 3151:502d
 ```
 
 ## License and Disclaimer
