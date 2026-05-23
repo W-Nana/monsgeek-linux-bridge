@@ -4,29 +4,13 @@ Rust Linux connector for the legacy MonsGeek web driver at
 `https://web.monsgeek.com`.
 
 The official web driver expects a local `iot_driver` connector on
-`http://127.0.0.1:3814`. MonsGeek provides that connector for macOS, but not
-for Linux. This project implements a Linux gRPC-Web bridge that speaks the same
-local API and forwards confirmed keyboard operations to the Linux HID
-feature-report interface.
+`http://127.0.0.1:3814`. MonsGeek provides that connector for macOS, but not for
+Linux. This project implements a user-space gRPC-Web bridge that speaks the same
+local API and forwards confirmed keyboard operations to Linux HID feature
+reports.
 
-This is not an official MonsGeek project, and it is not a kernel driver. It is a
-user-space compatibility bridge.
-
-## Rust Rewrite
-
-The stable connector is now the Rust binary in `src/main.rs`.
-
-The earlier Node.js prototype remains in `tools/grpc-web-probe.mjs` as a
-reference and fallback while more keyboards are tested, but it is no longer the
-preferred runtime. The Rust bridge removes the two biggest prototype shortcuts:
-
-- HID feature reports are handled in-process with Linux `HIDIOCSFEATURE` and
-  `HIDIOCGFEATURE` ioctls. There is no per-request fork/exec C helper, no
-  command-line hex transport, and no binary-to-string-to-binary conversion.
-- Vendor/input events are read through Tokio `AsyncFd`, so the process waits on
-  kernel readiness instead of polling hidraw every 10 ms with synchronous reads.
-  `watchVender` keeps a real gRPC-Web text stream open and broadcasts
-  hardware-originated simulation/calibration events to subscribed web clients.
+This is independent compatibility work. It is not an official MonsGeek project
+and it is not a kernel driver.
 
 ## Status
 
@@ -38,31 +22,23 @@ Working and hardware-verified on the current test keyboard:
 - 64-byte HID feature-report write/read through `sendMsg` and `readMsg`
 - Raw feature send/read compatibility
 - Lighting writes triggered by the official web UI
-- Main-layer remapping
-- Fn-layer remapping
+- Main-layer and Fn-layer remapping
 - Macro storage and macro assignment
 - Full calibration flow through the official web UI
 - Local DB methods used by the web driver
 - API-compatible responses for all 21 currently exposed `DriverGrpc` methods
 
-Implemented for API compatibility, but not confirmed as keyboard hardware
-operations:
-
-- Weather response
-- Linux system-info stream event
-- Microphone mute state compatibility
-- Empty vendor-event stream placeholder
-- Wireless-loop acknowledgement
-- `cleanDev` acknowledgement
-
-Intentionally not implemented:
+Not implemented by design:
 
 - `upgradeOTAGATT` firmware flashing. The bridge returns a valid progress
   response with an error string and does not write firmware bytes.
 
+See [docs/features.md](docs/features.md) for the full feature matrix.
+
 ## Quick Start
 
-Install the udev rule so your user can read and write the MonsGeek hidraw node:
+Install the udev rule so your active desktop user can read and write the
+MonsGeek hidraw node:
 
 ```sh
 sudo install -m 0644 udev/99-monsgeek-hidraw.rules /etc/udev/rules.d/
@@ -71,12 +47,6 @@ sudo udevadm trigger
 ```
 
 Replug the keyboard after installing the rule.
-
-Inspect detected HID endpoints:
-
-```sh
-node tools/hid-sysfs-probe.mjs
-```
 
 Build and start the local connector:
 
@@ -114,194 +84,21 @@ MONSGEEK_HIDRAW=/dev/null node tools/grpc-smoke-test.mjs
 The HID send/read methods will report ioctl errors inside their protobuf
 payloads, but the gRPC-Web compatibility surface should still pass.
 
-## Configuration
+## Documentation
 
-The bridge is configured with environment variables:
+- [Configuration](docs/configuration.md)
+- [Architecture](docs/architecture.md)
+- [Feature matrix](docs/features.md)
+- [Confirmed UI flows](docs/ui-flows.md)
+- [Reverse-engineering notes](docs/reverse-engineering.md)
+- [Safety notes](docs/safety.md)
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MONSGEEK_HIDRAW` | auto-detected, fallback `/dev/hidraw4` | Override the Linux hidraw endpoint |
-| `MONSGEEK_VENDOR_HIDRAWS` | all MonsGeek `3151:502d` hidraw nodes | Comma-separated hidraw nodes to monitor for vendor/input events |
-| `MONSGEEK_DEVICE_ID` | read from keyboard with `GET_INFOR` | Override the web-driver device ID while testing |
-| `MONSGEEK_TRACE_HID` | unset | Set to `1` to log full 64-byte HID reports |
-| `MONSGEEK_TRACE_FOCUS` | unset | Set to `1` to log only vendor-input and magnet calibration/simulation events |
-| `MONSGEEK_DB_FILE` | `~/.local/state/monsgeek-linux-bridge/db.json` | Override the local JSON DB path |
-| `MONSGEEK_CALIBRATION_INPUT_CACHE` | `1` | Cache hardware magnet travel events while `e5 fe` calibration reads are active |
-| `MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS` | `2500` | Time window for calibration travel max retention after the last `e5 fe` poll |
-| `MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS` | `700` | Require a nearby boot-keyboard input report before accepting calibration travel |
-| `MONSGEEK_CALIBRATION_INPUT_STABILIZE_MS` | `180` | Ignore initial calibration vendor-input samples after entering calibration/max mode |
-| `MONSGEEK_CALIBRATION_INPUT_CONFIRM_MS` | `90` | Require a second same-key travel sample before accepting a calibration max update |
-| `MONSGEEK_CALIBRATION_PRESS_SELECT_MS` | `45` | Per-keypress candidate window used to lock calibration to one dominant key |
-| `MONSGEEK_MAC_SEND_SETTLE_MS` | `0` | Optional macOS-driver-observed delay around feature writes |
-| `MONSGEEK_MAC_READ_POLL_MS` | `0` | Optional macOS-driver-observed poll interval for transient calibration reads |
-| `MONSGEEK_MAC_READ_POLL_ATTEMPTS` | `1` | Optional retry count for transient calibration reads |
-| `MONSGEEK_ALLOW_OTA` | unset | Reserved. OTA still refuses even when set today |
-
-Example with explicit hidraw and verbose report logging:
-
-```sh
-MONSGEEK_HIDRAW=/dev/hidraw4 MONSGEEK_TRACE_HID=1 cargo run --release
-```
-
-Focused calibration/simulation logging:
-
-```sh
-MONSGEEK_TRACE_FOCUS=1 cargo run --release
-```
-
-## How It Works
-
-The official web bundle calls a local gRPC-Web service at:
+## Repository Layout
 
 ```text
-http://127.0.0.1:3814/driver.DriverGrpc/<method>
-```
-
-This bridge implements that local service in Rust. For real keyboard I/O, it
-issues Linux `HIDIOCSFEATURE` and `HIDIOCGFEATURE` ioctls directly against the
-vendor configuration hidraw endpoint. Vendor/input reports are consumed through
-an event-driven `AsyncFd` reader.
-
-On the current FUN60 PRO, the vendor configuration endpoint is:
-
-- USB vendor/product: `3151:502d`
-- HID usage page: `0xffff`
-- Feature report size: 64 bytes
-- Observed interface: interface 2
-
-The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
-`MONSGEEK_HIDRAW=/dev/hidrawN` if auto-detection chooses the wrong node.
-
-## Feature Matrix
-
-| Area | Linux bridge status | Hardware effect |
-| --- | --- | --- |
-| Device discovery | Implemented | Real local device enumeration |
-| `sendMsg` / `readMsg` | Implemented and verified | Real USB HID feature-report I/O |
-| `sendRawFeature` / `readRawFeature` | Implemented | Real USB HID feature-report I/O |
-| Lighting writes | Implemented through HID reports | Real keyboard write |
-| `setLightType` RPC | Implemented as official protobuf decode plus event-state update | Starts/stops official light/simulation event state; pixel/audio streaming is still connector-side compatibility |
-| Main remap | Implemented and verified | Real keyboard write |
-| Fn remap | Implemented and verified | Real keyboard write |
-| Macro DB editing | Implemented | Local DB only |
-| Macro assignment | Implemented and verified | Real keyboard write |
-| Calibration | Implemented and verified | Real keyboard read/write flow |
-| Local DB RPCs | Implemented as JSON DB | Local connector persistence only |
-| `getWeather` | Synthetic compatibility response | Network helper only |
-| `watchSystemInfo` | Implemented as a live gRPC-Web stream with Linux system data | Host telemetry only |
-| Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
-| `watchVender` | Implemented as a live gRPC-Web stream plus Linux hidraw input reader | Mirrors bridge-known events and forwards hardware vendor/input events |
-| `changeWirelessLoopStatus` | Acknowledged | Internal loop/lock control |
-| `cleanDev` | Acknowledged | Local connector state cleanup only |
-| `upgradeOTAGATT` | Refused by design | Not implemented |
-
-## Reverse-Engineering Notes
-
-The official `iot_v189.dmg` contains `iotdriver.app` with two Mach-O binaries:
-
-- `Contents/MacOS/rust-iot-tray`
-- `Contents/Resources/iot_driver`
-
-`rust-iot-tray` is only a tray launcher. The real connector is
-`Contents/Resources/iot_driver`, an x86_64 Rust user-space service using tonic
-gRPC-Web on `127.0.0.1:3814`.
-
-The macOS connector keeps enough Rust symbols and strings to identify its
-major modules:
-
-- `grpc_server`
-- `dj_dev_manger`
-- `dj_dev_api`
-- `dj_hid_device`
-- `ble_upgrade`
-- `dj_sound`
-- `dj_screen`
-- `system_info`
-- `get_weather`
-
-Those symbols and imports show:
-
-- HIDAPI is used for USB feature reports.
-- CoreBluetooth/btleplug is used for BLE OTA/GATT.
-- CPAL/CoreAudio is used for audio-related helpers.
-- screen-capture support exists for screen/light features.
-- sled is used for local key/value persistence.
-- reqwest is used for weather HTTP requests.
-
-Useful macOS binary evidence:
-
-| API area | macOS evidence | Assessment |
-| --- | --- | --- |
-| HID write/read | `DJDevApi::send_msg`, `read_msg`, `send_msg_by_dev_path`, `read_msg_by_dev_path` | Real keyboard feature-report path |
-| Lighting | `handle_light`, `check_light_type`, plus `LIGHT TYPE == not yet implemented` for the RPC wrapper | Actual writes happen through HID reports, not `setLightType` alone |
-| Key matrix and macros | `FEA_CMD_SET_KEYMATRIX`, `FEA_CMD_SET_MACRO`, `FEA_CMD_GET_MACRO` | Real keyboard configuration commands |
-| Weather | `src/get_weather.rs`, reqwest, `http://w2.yiketianqi.com/` URL | Network helper |
-| System info | `src/system_info/mod.rs`, `SystemInfoManger::get`, `machdep.cpu.vendor` | Host telemetry |
-| Microphone/audio | AudioUnit/CoreAudio imports, `dj_sound`, `CpalSound`, `ToggleMicrophoneMute` | OS/audio helper, not proven keyboard write |
-| Vendor stream | `start_watch_vender`, `handle_vender`, `VenderMsg` variants | Real async event stream on macOS |
-| Wireless loop | `LOCK_WIRELESS_LOOP`, `get_wireless_lock_status`, `set_lock_all_dev` | Internal connector lock/loop control |
-| Clean device | `DJDeviceManger::clean_dev`, `clean_all_vendor`, `CLEAN DEV` strings | Local connector state cleanup |
-| OTA | `src/ble_upgrade/mod.rs`, CoreBluetooth/btleplug, GATT UUIDs, `RY KB OTA` | Real BLE firmware flashing path; not ported |
-
-The HID timing model has been partially identified from the macOS binary. The
-`DJDevice::send_read_msg` path marks the device as reading/sending, waits 10 ms,
-calls `send_msg`, waits another 10 ms, calls `read_msg`, then unsets the
-reading/sending marker. The write/read helpers also call `pasue24loop` for 24G
-state and `wait_fb_write_finish`, which polls `fb_24_check_status` every 100 ms
-for up to 15 attempts. Those timings are exposed as optional environment
-variables, but remain disabled by default because the Linux feature-report path
-is already synchronous and the extra wait is visible in the web UI.
-
-## Confirmed UI Flows
-
-These flows were exercised through the official web UI on the current FUN60 PRO:
-
-- Light page: toggling the current `Dazzle` checkbox called `setLightType` and
-  then sent a `sendMsg` report beginning with `07 01 04 03`. Reverting changed
-  the observed report byte from `07` back to `08`.
-- Simulation/vendor stream: the web UI consumes `VenderMsg.msg.slice(1, 4)`.
-  The Linux bridge now emits the same shapes for start/stop (`0f 01 00` /
-  `0f 00 00`), light changes (`04 xx 00`), and magnet travel notifications
-  (`1b lo hi index`). Hardware-originated magnet travel events are forwarded
-  from the hidraw input stream without synthetic replacement. Set
-  `MONSGEEK_VENDOR_INPUT_READER=0` to disable that reader. A synthetic fallback
-  can be enabled for UI debugging with `MONSGEEK_SYNTHETIC_SIMULATION=1`; its
-  ceiling defaults to `400` and can be tuned with `MONSGEEK_SIM_TRAVEL_MAX`.
-- Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
-  `Confirm` wrote a report beginning with `0a 00 53`.
-- FnSetting page: selected-key reset and restore used reports beginning with
-  `10 00 00 53`.
-- Macro assignment: assigning a temporary `Macro_1` produced a remap report
-  beginning with `0a 00 53` and an additional macro payload beginning with
-  `0b 00 00 38`.
-- Calibration: the official UI reads travel data with paged `e5 fe` reports.
-  On Linux, the feature read can return zeros while the keyboard still emits
-  real magnet travel on the vendor input hidraw stream. The bridge now only
-  preserves per-key maxima during the second calibration screen (`1e` / maximum
-  mode), starts the vendor travel stream only after an actual boot-keyboard
-  press report, locks each physical press to one dominant vendor key candidate,
-  requires two same-key samples before accepting a max update, feeds that back
-  through the paged `readMsg` response, and clears it when the polling window
-  ends. The older read-payload max-hold shim remains disabled by default; enable only for diagnostics with
-  `MONSGEEK_CALIBRATION_HOLD=1`.
-
-## Safety Notes
-
-This bridge can write configuration reports to your keyboard. Use it only if
-you are comfortable testing experimental tooling against your device.
-
-OTA is deliberately blocked. Firmware flashing needs a device-specific Linux
-BLE/GATT implementation and review before it should be enabled.
-
-The included udev rule uses `MODE="0660"` with `TAG+="uaccess"`, allowing the
-active local seat user to access the keyboard hidraw node without making it
-world-readable. If your distro does not apply `uaccess` ACLs, create a dedicated
-group and add `GROUP="your-group"` to the rule instead of relaxing it to `0666`.
-
-## Repository Contents
-
-```text
-src/main.rs                    Rust local gRPC-Web connector
+src/main.rs                    thin Rust binary entrypoint
+src/bridge.rs                  Rust local gRPC-Web connector
+docs/                          split project documentation
 tools/grpc-smoke-test.mjs      21-method API smoke test
 tools/grpc-web-probe.mjs       legacy Node.js prototype / fallback connector
 tools/hid-sysfs-probe.mjs      Linux hidraw/sysfs inspector
@@ -310,9 +107,6 @@ tools/hid-feature-version.c    narrow GET_REV feature-report test
 udev/99-monsgeek-hidraw.rules  udev rule for 3151:502d
 ```
 
-## License and Disclaimer
+## License
 
-No license has been selected yet.
-
-This project is independent research and compatibility work. It is not
-affiliated with or endorsed by MonsGeek. Use at your own risk.
+No license has been selected yet. Use at your own risk.
