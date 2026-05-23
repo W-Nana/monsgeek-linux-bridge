@@ -41,9 +41,7 @@ Install the udev rule so your active desktop user can read and write the
 MonsGeek hidraw node:
 
 ```sh
-sudo install -m 0644 udev/99-monsgeek-hidraw.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo cargo run --release -- install-udev
 ```
 
 Replug the keyboard after installing the rule.
@@ -105,6 +103,14 @@ tools/hid-sysfs-probe.mjs      Linux hidraw/sysfs inspector
 tools/hid-feature-io.c         legacy prototype HID feature-report helper
 tools/hid-feature-version.c    narrow GET_REV feature-report test
 udev/99-monsgeek-hidraw.rules  udev rule for 3151:502d
+```
+
+Useful subcommands:
+
+```sh
+cargo run --release -- --help
+cargo run --release -- print-udev-rule
+sudo cargo run --release -- install-udev
 ```
 
 ## License
