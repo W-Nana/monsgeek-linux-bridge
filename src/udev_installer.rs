@@ -24,9 +24,15 @@ pub fn install(args: Vec<String>) -> Result<()> {
         }
     }
 
+    if running_as_root() && parent_process_name().is_some_and(|name| name == "cargo") {
+        bail!(
+            "do not run `sudo cargo run --release -- install-udev`; it makes target/ root-owned. Run `cargo build --release` as your user, then `sudo ./target/release/monsgeek-linux-bridge install-udev`"
+        );
+    }
+
     if !running_as_root() {
         bail!(
-            "install-udev must write {RULE_FILE}; rerun with sudo or install the printed rule manually"
+            "install-udev must write {RULE_FILE}; run `cargo build --release` first, then `sudo ./target/release/monsgeek-linux-bridge install-udev`"
         );
     }
 
@@ -56,6 +62,13 @@ Options:\n  --no-reload  Write the rule but skip udevadm reload/trigger"
 
 fn running_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
+}
+
+fn parent_process_name() -> Option<String> {
+    let ppid = unsafe { libc::getppid() };
+    fs::read_to_string(format!("/proc/{ppid}/comm"))
+        .ok()
+        .map(|name| name.trim().to_string())
 }
 
 fn run_udevadm(args: &[&str]) -> Result<()> {

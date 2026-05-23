@@ -14,9 +14,13 @@ group and add `GROUP="your-group"` to the rule instead of relaxing it to `0666`.
 Install the bundled rule with:
 
 ```sh
-sudo cargo run --release -- install-udev
+cargo build --release
+sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
 The command writes `/etc/udev/rules.d/99-monsgeek-hidraw.rules`, reloads udev
 rules, and triggers hidraw devices. Use `--no-reload` if you only want to write
 the rule file.
+
+Do not use `sudo cargo run --release -- install-udev`. Running Cargo with sudo
+can leave `target/` owned by root and break later non-root builds.

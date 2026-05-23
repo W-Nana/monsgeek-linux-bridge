@@ -41,7 +41,8 @@ Install the udev rule so your active desktop user can read and write the
 MonsGeek hidraw node:
 
 ```sh
-sudo cargo run --release -- install-udev
+cargo build --release
+sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
 Replug the keyboard after installing the rule.
@@ -110,7 +111,7 @@ Useful subcommands:
 ```sh
 cargo run --release -- --help
 cargo run --release -- print-udev-rule
-sudo cargo run --release -- install-udev
+sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
 ## License
