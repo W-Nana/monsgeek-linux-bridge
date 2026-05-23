@@ -45,6 +45,10 @@ cargo build --release
 sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
+The installer adds a `GROUP="<your primary group>"` fallback to the udev rule,
+because some desktops tag hidraw devices with `uaccess` but do not apply the
+actual ACL. Use `--no-group` if you want to rely only on `uaccess`.
+
 Replug the keyboard after installing the rule.
 
 Build and start the local connector:

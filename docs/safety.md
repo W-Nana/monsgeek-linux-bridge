@@ -22,5 +22,12 @@ The command writes `/etc/udev/rules.d/99-monsgeek-hidraw.rules`, reloads udev
 rules, and triggers hidraw devices. Use `--no-reload` if you only want to write
 the rule file.
 
+By default, the installer adds `GROUP="<sudo user's primary group>"` as a
+fallback while keeping `MODE="0660"` and `TAG+="uaccess"`. This avoids the
+`0666` keylogger-shaped footgun, but still works on desktops where `uaccess`
+tags are present without actual ACLs. Use `--group=input` or another explicit
+group if you prefer a dedicated access group; use `--no-group` to rely only on
+`uaccess`.
+
 Do not use `sudo cargo run --release -- install-udev`. Running Cargo with sudo
 can leave `target/` owned by root and break later non-root builds.
