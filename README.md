@@ -148,7 +148,7 @@ The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
 | `sendMsg` / `readMsg` | Implemented and verified | Real USB HID feature-report I/O |
 | `sendRawFeature` / `readRawFeature` | Implemented | Real USB HID feature-report I/O |
 | Lighting writes | Implemented through HID reports | Real keyboard write |
-| `setLightType` RPC | Acknowledged | No standalone hardware effect confirmed |
+| `setLightType` RPC | Implemented as official protobuf decode plus event-state update | Starts/stops official light/simulation event state; pixel/audio streaming is still connector-side compatibility |
 | Main remap | Implemented and verified | Real keyboard write |
 | Fn remap | Implemented and verified | Real keyboard write |
 | Macro DB editing | Implemented | Local DB only |
@@ -156,9 +156,9 @@ The bridge auto-detects this endpoint from `/sys/class/hidraw`. Use
 | Calibration | Implemented and verified | Real keyboard read/write flow |
 | Local DB RPCs | Implemented as JSON DB | Local connector persistence only |
 | `getWeather` | Synthetic by default, optional live fetch | Network helper only |
-| `watchSystemInfo` | Implemented with Linux system data | Host telemetry only |
+| `watchSystemInfo` | Implemented as a live gRPC-Web stream with Linux system data | Host telemetry only |
 | Microphone RPCs | In-memory compatibility state | No keyboard write evidence |
-| `watchVender` | Empty compatibility event | Async vendor events not mirrored yet |
+| `watchVender` | Implemented as a live gRPC-Web stream with official UI-compatible event bytes | Mirrors bridge-known light/calibration events; cannot synthesize physical key events |
 | `changeWirelessLoopStatus` | Acknowledged | Internal loop/lock control |
 | `cleanDev` | Acknowledged | Local connector state cleanup only |
 | `upgradeOTAGATT` | Refused by design | Not implemented |
@@ -218,6 +218,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
 - Light page: toggling the current `Dazzle` checkbox called `setLightType` and
   then sent a `sendMsg` report beginning with `07 01 04 03`. Reverting changed
   the observed report byte from `07` back to `08`.
+- Simulation/vendor stream: the web UI consumes `VenderMsg.msg.slice(1, 4)`.
+  The Linux bridge now emits the same shapes for start/stop (`0f 01 00` /
+  `0f 00 00`), light changes (`04 xx 00`), and magnet travel notifications
+  (`1b xx 00`).
 - Main remap page: selecting `r_Ctrl`, capturing `ArrowRight`, and pressing
   `Confirm` wrote a report beginning with `0a 00 53`.
 - FnSetting page: selected-key reset and restore used reports beginning with

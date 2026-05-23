@@ -31,7 +31,22 @@ const TRACE_HID_REPORTS = process.env.MONSGEEK_TRACE_HID === "1";
 const LIVE_WEATHER = process.env.MONSGEEK_LIVE_WEATHER === "1";
 const WEATHER_ENDPOINT = "http://w2.yiketianqi.com/";
 const GET_INFOR = 0x8f;
+const CHECKSUM_BIT7 = 0;
+const CHECKSUM_BIT8 = 1;
+const LIGHT_MUSIC2 = 0;
+const LIGHT_SCREEN = 1;
+const LIGHT_OTHER = 2;
+const FEA_CMD_SET_LEDPARAMS = new Set([0x04, 0x06, 0x07]);
+const FEA_CMD_SET_MAGNETISM_CAL = 0x1c;
+const FEA_CMD_SET_MAGNETISM_CALMAX = 0x1e;
+const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
 let microphoneMuted = false;
+const deviceStates = new Map();
+const streamClients = {
+  watchDevList: new Set(),
+  watchVender: new Set(),
+  watchSystemInfo: new Set(),
+};
 
 function readSysfsText(file) {
   try {
@@ -152,6 +167,40 @@ function grpcTextResponse(message, status = 0, statusMessage = "") {
   return Buffer.concat(frames).toString("base64");
 }
 
+function writeGrpcWebMessage(response, message) {
+  response.write(grpcFrame(0x00, message).toString("base64"));
+}
+
+function attachStream(method, response, producer, intervalMs) {
+  response.writeHead(200, headers());
+  const clients = streamClients[method];
+  clients?.add(response);
+
+  const emit = () => {
+    try {
+      writeGrpcWebMessage(response, producer());
+    } catch (error) {
+      writeGrpcWebMessage(response, Buffer.alloc(0));
+      console.warn(`${method} stream producer failed: ${error.message}`);
+    }
+  };
+
+  emit();
+  const timer = setInterval(emit, intervalMs);
+  const close = () => {
+    clearInterval(timer);
+    clients?.delete(response);
+  };
+  response.on("close", close);
+  response.on("finish", close);
+}
+
+function broadcastStream(method, message) {
+  for (const response of streamClients[method] ?? []) {
+    writeGrpcWebMessage(response, message);
+  }
+}
+
 function requestPayload(body) {
   let raw;
   try {
@@ -216,7 +265,12 @@ function decodeBytes(bytes, index) {
 }
 
 function decodeSendMsg(bytes) {
-  const message = { devicePath: DEFAULT_HIDRAW, payload: Buffer.alloc(0), checksumType: 0 };
+  const message = {
+    devicePath: DEFAULT_HIDRAW,
+    payload: Buffer.alloc(0),
+    checksumType: CHECKSUM_BIT7,
+    dangleDevType: 0,
+  };
   for (let index = 0; index < bytes.length; ) {
     const key = decodeVarint(bytes, index);
     index = key.next;
@@ -235,6 +289,47 @@ function decodeSendMsg(bytes) {
     if (field === 3 && wireType === 0) {
       const value = decodeVarint(bytes, index);
       message.checksumType = value.value;
+      index = value.next;
+      continue;
+    }
+    if (field === 4 && wireType === 0) {
+      const value = decodeVarint(bytes, index);
+      message.dangleDevType = value.value;
+      index = value.next;
+      continue;
+    }
+    index = skipField(bytes, index, wireType);
+  }
+  return message;
+}
+
+function decodeSetLight(bytes) {
+  const message = {
+    devicePath: DEFAULT_HIDRAW,
+    lightType: LIGHT_OTHER,
+    screenId: 0,
+    dangleDevType: 0,
+  };
+  for (let index = 0; index < bytes.length; ) {
+    const key = decodeVarint(bytes, index);
+    index = key.next;
+    const field = key.value >> 3;
+    const wireType = key.value & 0x07;
+    if (field === 1 && wireType === 2) {
+      const value = decodeBytes(bytes, index);
+      message.devicePath = value.value.toString("utf8");
+      index = value.next;
+      continue;
+    }
+    if ((field === 2 || field === 3 || field === 4) && wireType === 0) {
+      const value = decodeVarint(bytes, index);
+      if (field === 2) {
+        message.lightType = value.value;
+      } else if (field === 3) {
+        message.screenId = value.value;
+      } else {
+        message.dangleDevType = value.value;
+      }
       index = value.next;
       continue;
     }
@@ -349,14 +444,74 @@ function decodeOtaUpgrade(bytes) {
 function normalizedPayload(payload, checksumType) {
   const report = Buffer.alloc(64);
   payload.copy(report, 0, 0, report.length);
-  if (checksumType === 0) {
+  if (checksumType === CHECKSUM_BIT7) {
     let sum = 0;
     for (let index = 0; index < 7; index += 1) {
       sum += report[index];
     }
     report[7] = 0xff - (sum & 0xff);
+  } else if (checksumType === CHECKSUM_BIT8) {
+    let sum = 0;
+    for (let index = 0; index < 8; index += 1) {
+      sum += report[index];
+    }
+    report[8] = 0xff - (sum & 0xff);
   }
   return report;
+}
+
+function stateFor(devicePath) {
+  const key = devicePath || DEFAULT_HIDRAW;
+  if (!deviceStates.has(key)) {
+    deviceStates.set(key, {
+      lastCommand: undefined,
+      lastLedParam: undefined,
+      light: { lightType: LIGHT_OTHER, screenId: 0, dangleDevType: 0 },
+      calibration: {
+        active: false,
+        maximum: false,
+        travelReads: 0,
+      },
+    });
+  }
+  return deviceStates.get(key);
+}
+
+function lightTypeName(lightType) {
+  if (lightType === LIGHT_MUSIC2) {
+    return "MUSIC2";
+  }
+  if (lightType === LIGHT_SCREEN) {
+    return "SCREEN";
+  }
+  if (lightType === LIGHT_OTHER) {
+    return "OTHER";
+  }
+  return `UNKNOWN_${lightType}`;
+}
+
+function updateWriteState(message, report) {
+  const state = stateFor(message.devicePath);
+  state.lastCommand = report[0];
+  if (FEA_CMD_SET_LEDPARAMS.has(report[0])) {
+    state.lastLedParam = Buffer.from(report);
+    broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x04, report[1] & 0xff, 0x00])));
+  } else if (report[0] === FEA_CMD_SET_MAGNETISM_CAL) {
+    state.calibration.active = report[1] !== 0;
+  } else if (report[0] === FEA_CMD_SET_MAGNETISM_CALMAX) {
+    state.calibration.maximum = report[1] !== 0;
+  } else if (report[0] === FEA_CMD_GET_MAGNETISM_BY_ARR) {
+    state.calibration.travelReads += 1;
+    broadcastStream("watchVender", venderMessage(Buffer.from([0x00, 0x1b, report[3] & 0xff, 0x00])));
+  }
+}
+
+function venderMessage(payload) {
+  return payload.length > 0 ? protobufBytes(1, payload) : Buffer.alloc(0);
+}
+
+function venderLightPayload(light) {
+  return Buffer.from([0x00, 0x0f, light.lightType === LIGHT_OTHER ? 0x00 : 0x01, 0x00]);
 }
 
 function hidTrace(report) {
@@ -623,8 +778,19 @@ async function responseFor(method, requestMessage) {
     return { message: systemInfoMessage(), note: "Linux system info event" };
   }
 
-  if (method === "changeWirelessLoopStatus" || method === "setLightType") {
+  if (method === "changeWirelessLoopStatus") {
     return { message: Buffer.alloc(0), note: `${method} acknowledged` };
+  }
+
+  if (method === "setLightType") {
+    const light = decodeSetLight(requestMessage);
+    const state = stateFor(light.devicePath);
+    state.light = light;
+    broadcastStream("watchVender", venderMessage(venderLightPayload(light)));
+    return {
+      message: Buffer.alloc(0),
+      note: `setLightType ${lightTypeName(light.lightType)} screen=${light.screenId} dangle=${light.dangleDevType}`,
+    };
   }
 
   if (method === "muteMicrophone") {
@@ -689,9 +855,10 @@ async function responseFor(method, requestMessage) {
     try {
       const payload = normalizedPayload(message.payload, message.checksumType);
       featureIo(["send", message.devicePath || DEFAULT_HIDRAW, payload.toString("hex")]);
+      updateWriteState(message, payload);
       return {
         message: resSend(),
-        note: `${method} checksum=${message.checksumType} ${hidTrace(payload)}`,
+        note: `${method} checksum=${message.checksumType} dangle=${message.dangleDevType} cmd=0x${payload[0].toString(16)} ${hidTrace(payload)}`,
       };
     } catch (error) {
       return { message: resSend(error.message), note: `${method} failed: ${error.message}` };
@@ -740,6 +907,24 @@ const server = http.createServer((request, response) => {
     const method = request.url?.split("/").at(-1) ?? "unknown";
     const bytes = Buffer.concat(body);
     const payload = requestPayload(bytes);
+    if (method === "watchDevList") {
+      console.log(`${request.method} ${request.url} ${payload} -> MonsGeek device list stream`);
+      attachStream(method, response, deviceListMessage, 5000);
+      return;
+    }
+    if (method === "watchVender") {
+      console.log(`${request.method} ${request.url} ${payload} -> vendor event stream`);
+      attachStream(method, response, () => {
+        const firstState = deviceStates.values().next().value;
+        return venderMessage(firstState ? venderLightPayload(firstState.light) : Buffer.alloc(0));
+      }, 5000);
+      return;
+    }
+    if (method === "watchSystemInfo") {
+      console.log(`${request.method} ${request.url} ${payload} -> Linux system info stream`);
+      attachStream(method, response, systemInfoMessage, 5000);
+      return;
+    }
     let result;
     try {
       result = await responseFor(method, decodeGrpcTextBody(bytes));

@@ -5,6 +5,7 @@ import http from "node:http";
 const HOST = process.env.MONSGEEK_BRIDGE_HOST ?? "127.0.0.1";
 const PORT = Number.parseInt(process.env.MONSGEEK_BRIDGE_PORT ?? "3814", 10);
 const ORIGIN = "https://web.monsgeek.com";
+const STREAMING_METHODS = new Set(["watchDevList", "watchVender", "watchSystemInfo"]);
 
 function encodeVarint(value) {
   const bytes = [];
@@ -57,6 +58,13 @@ function grpcStatus(frames) {
 
 function call(method, payload = Buffer.alloc(0)) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
     const body = grpcRequest(payload);
     const request = http.request(
       {
@@ -73,10 +81,25 @@ function call(method, payload = Buffer.alloc(0)) {
       },
       (response) => {
         const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("data", (chunk) => {
+          chunks.push(chunk);
+          if (STREAMING_METHODS.has(method)) {
+            const frames = parseGrpcText(Buffer.concat(chunks).toString("ascii"));
+            const firstMessage = frames.find((frame) => frame.flag === 0x00);
+            if (firstMessage) {
+              settle({
+                method,
+                httpStatus: response.statusCode,
+                grpcStatus: 0,
+                responseBytes: firstMessage.payload.length,
+              });
+              request.destroy();
+            }
+          }
+        });
         response.on("end", () => {
           const frames = parseGrpcText(Buffer.concat(chunks).toString("ascii"));
-          resolve({
+          settle({
             method,
             httpStatus: response.statusCode,
             grpcStatus: grpcStatus(frames),
@@ -85,7 +108,15 @@ function call(method, payload = Buffer.alloc(0)) {
         });
       },
     );
-    request.on("error", reject);
+    request.setTimeout(3000, () => {
+      request.destroy(new Error(`${method} timed out`));
+    });
+    request.on("error", (error) => {
+      if (settled && STREAMING_METHODS.has(method)) {
+        return;
+      }
+      reject(error);
+    });
     request.end(body);
   });
 }
