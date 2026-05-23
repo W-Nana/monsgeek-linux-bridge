@@ -117,6 +117,7 @@ The bridge is configured with environment variables:
 | `MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS` | `700` | Require a nearby boot-keyboard input report before accepting calibration travel |
 | `MONSGEEK_CALIBRATION_INPUT_STABILIZE_MS` | `180` | Ignore initial calibration vendor-input samples after entering calibration/max mode |
 | `MONSGEEK_CALIBRATION_INPUT_CONFIRM_MS` | `90` | Require a second same-key travel sample before accepting a calibration max update |
+| `MONSGEEK_CALIBRATION_PRESS_SELECT_MS` | `45` | Per-keypress candidate window used to lock calibration to one dominant key |
 | `MONSGEEK_MAC_SEND_SETTLE_MS` | `0` | Optional macOS-driver-observed delay around feature writes |
 | `MONSGEEK_MAC_READ_POLL_MS` | `0` | Optional macOS-driver-observed poll interval for transient calibration reads |
 | `MONSGEEK_MAC_READ_POLL_ATTEMPTS` | `1` | Optional retry count for transient calibration reads |
@@ -263,10 +264,10 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   real magnet travel on the vendor input hidraw stream. The bridge now keeps a
   short-lived per-key maximum from those hardware events while `e5 fe` polling
   is active, starts the vendor travel stream only after an actual boot-keyboard
-  press report, requires two same-key samples before accepting a max update,
-  feeds that back through the paged `readMsg` response, and clears it when the
-  polling window ends. The older read-payload max-hold shim remains disabled by default;
-  enable only for diagnostics with
+  press report, locks each physical press to one dominant vendor key candidate,
+  requires two same-key samples before accepting a max update, feeds that back
+  through the paged `readMsg` response, and clears it when the polling window
+  ends. The older read-payload max-hold shim remains disabled by default; enable only for diagnostics with
   `MONSGEEK_CALIBRATION_HOLD=1`.
 
 ## Safety Notes

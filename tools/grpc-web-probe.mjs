@@ -69,6 +69,10 @@ const CALIBRATION_INPUT_CONFIRM_MS = Number.parseInt(
   process.env.MONSGEEK_CALIBRATION_INPUT_CONFIRM_MS ?? "90",
   10,
 );
+const CALIBRATION_PRESS_SELECT_MS = Number.parseInt(
+  process.env.MONSGEEK_CALIBRATION_PRESS_SELECT_MS ?? "45",
+  10,
+);
 const CALIBRATION_KEYS_PER_PAGE = 32;
 const CALIBRATION_MAX_KEYS = CALIBRATION_KEYS_PER_PAGE * 4;
 const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
@@ -82,6 +86,7 @@ const streamClients = {
 };
 const vendorInputReaders = new Map();
 let physicalKeyboardInputActiveUntil = 0;
+let lastBootKeyboardInput = "";
 
 function sleep(ms) {
   if (ms <= 0) {
@@ -622,6 +627,12 @@ function stateFor(devicePath) {
         inputActiveUntil: 0,
         inputIgnoreUntil: 0,
         pendingInput: undefined,
+        press: {
+          active: false,
+          keyIndex: undefined,
+          startedAt: 0,
+          candidates: new Map(),
+        },
         devicePath: key,
         inputReportPath: undefined,
         inputReportOwned: false,
@@ -764,7 +775,71 @@ function resetCalibrationCache(state) {
   state.calibration.inputActiveUntil = 0;
   state.calibration.inputIgnoreUntil = 0;
   state.calibration.pendingInput = undefined;
+  resetCalibrationPress(state);
   stopCalibrationInputReport(state);
+}
+
+function resetCalibrationPress(state, now = Date.now()) {
+  state.calibration.press = {
+    active: false,
+    keyIndex: undefined,
+    startedAt: now,
+    candidates: new Map(),
+  };
+}
+
+function beginCalibrationPress(state, now) {
+  state.calibration.press = {
+    active: true,
+    keyIndex: undefined,
+    startedAt: now,
+    candidates: new Map(),
+  };
+  state.calibration.pendingInput = undefined;
+}
+
+function selectCalibrationPressKey(state, keyIndex, travel, now) {
+  const press = state.calibration.press;
+  if (!press.active) {
+    return false;
+  }
+  if (press.keyIndex !== undefined) {
+    return press.keyIndex === keyIndex;
+  }
+
+  const candidate = press.candidates.get(keyIndex) ?? { count: 0, max: 0, lastAt: 0 };
+  candidate.count += 1;
+  candidate.max = Math.max(candidate.max, travel);
+  candidate.lastAt = now;
+  press.candidates.set(keyIndex, candidate);
+
+  if (now - press.startedAt < CALIBRATION_PRESS_SELECT_MS) {
+    return false;
+  }
+
+  let selectedKey;
+  let selected = { count: 0, max: 0, lastAt: 0 };
+  for (const [candidateKey, value] of press.candidates) {
+    if (value.count < 2) {
+      continue;
+    }
+    if (
+      value.count > selected.count ||
+      (value.count === selected.count && value.max > selected.max) ||
+      (value.count === selected.count && value.max === selected.max && value.lastAt > selected.lastAt)
+    ) {
+      selectedKey = candidateKey;
+      selected = value;
+    }
+  }
+
+  if (selectedKey === undefined) {
+    return false;
+  }
+
+  press.keyIndex = selectedKey;
+  focusTrace(`calibration press selected key=${selectedKey} samples=${selected.count} travel=${selected.max}`);
+  return selectedKey === keyIndex;
 }
 
 function noteCalibrationTravelRead(state, kind, devicePath) {
@@ -869,6 +944,9 @@ function noteVendorInputReport(report) {
     if (now < state.calibration.inputIgnoreUntil) {
       continue;
     }
+    if (!selectCalibrationPressKey(state, keyIndex, travel, now)) {
+      continue;
+    }
 
     const pending = state.calibration.pendingInput;
     if (!pending || pending.keyIndex !== keyIndex || now - pending.time > CALIBRATION_INPUT_CONFIRM_MS) {
@@ -902,14 +980,23 @@ function notePhysicalKeyboardInput(report) {
 
   const hasPressedKey = report.some((byte) => byte !== 0);
   const now = Date.now();
+  const bootKey = report.toString("hex");
+  const changed = bootKey !== lastBootKeyboardInput;
+  lastBootKeyboardInput = bootKey;
   physicalKeyboardInputActiveUntil = hasPressedKey ? now + CALIBRATION_PHYSICAL_INPUT_GRACE_MS : 0;
 
   if (!hasPressedKey) {
+    for (const state of deviceStates.values()) {
+      resetCalibrationPress(state, now);
+    }
     return;
   }
 
   for (const state of deviceStates.values()) {
     if (now <= state.calibration.inputActiveUntil) {
+      if (changed) {
+        beginCalibrationPress(state, now);
+      }
       ensureCalibrationInputReport(state, state.calibration.devicePath || DEFAULT_HIDRAW);
     }
   }
