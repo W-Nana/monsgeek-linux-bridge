@@ -58,6 +58,17 @@ const CALIBRATION_PHYSICAL_INPUT_GRACE_MS = Number.parseInt(
   process.env.MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS ?? "700",
   10,
 );
+const MAC_SEND_SETTLE_MS = Number.parseInt(process.env.MONSGEEK_MAC_SEND_SETTLE_MS ?? "10", 10);
+const MAC_READ_POLL_MS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_MS ?? "100", 10);
+const MAC_READ_POLL_ATTEMPTS = Number.parseInt(process.env.MONSGEEK_MAC_READ_POLL_ATTEMPTS ?? "15", 10);
+const CALIBRATION_INPUT_STABILIZE_MS = Number.parseInt(
+  process.env.MONSGEEK_CALIBRATION_INPUT_STABILIZE_MS ?? "180",
+  10,
+);
+const CALIBRATION_INPUT_CONFIRM_MS = Number.parseInt(
+  process.env.MONSGEEK_CALIBRATION_INPUT_CONFIRM_MS ?? "90",
+  10,
+);
 const CALIBRATION_KEYS_PER_PAGE = 32;
 const CALIBRATION_MAX_KEYS = CALIBRATION_KEYS_PER_PAGE * 4;
 const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
@@ -71,6 +82,13 @@ const streamClients = {
 };
 const vendorInputReaders = new Map();
 let physicalKeyboardInputActiveUntil = 0;
+
+function sleep(ms) {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function focusTrace(message) {
   if (TRACE_FOCUS) {
@@ -602,6 +620,8 @@ function stateFor(devicePath) {
         maxPages: new Map(),
         inputMax: new Uint16Array(CALIBRATION_MAX_KEYS),
         inputActiveUntil: 0,
+        inputIgnoreUntil: 0,
+        pendingInput: undefined,
         inputReportPath: undefined,
         inputReportOwned: false,
         inputReportTimer: undefined,
@@ -652,6 +672,7 @@ function updateWriteState(message, report) {
     focusTrace(`calibration ${state.calibration.active ? "on" : "off"} cmd=1c path=${message.devicePath}`);
     if (state.calibration.active) {
       resetCalibrationCache(state);
+      state.calibration.inputIgnoreUntil = Date.now() + CALIBRATION_INPUT_STABILIZE_MS;
     } else {
       resetCalibrationState(state);
     }
@@ -660,6 +681,7 @@ function updateWriteState(message, report) {
     focusTrace(`calibration maximum ${state.calibration.maximum ? "on" : "off"} cmd=1e path=${message.devicePath}`);
     if (state.calibration.maximum) {
       resetCalibrationCache(state);
+      state.calibration.inputIgnoreUntil = Date.now() + CALIBRATION_INPUT_STABILIZE_MS;
     } else {
       resetCalibrationState(state);
     }
@@ -737,6 +759,8 @@ function resetCalibrationCache(state) {
   state.calibration.maxPages.clear();
   state.calibration.inputMax.fill(0);
   state.calibration.inputActiveUntil = 0;
+  state.calibration.inputIgnoreUntil = 0;
+  state.calibration.pendingInput = undefined;
   stopCalibrationInputReport(state);
 }
 
@@ -839,11 +863,31 @@ function noteVendorInputReport(report) {
     if (now > state.calibration.inputActiveUntil) {
       continue;
     }
+    if (now < state.calibration.inputIgnoreUntil) {
+      continue;
+    }
+
+    const pending = state.calibration.pendingInput;
+    if (!pending || pending.keyIndex !== keyIndex || now - pending.time > CALIBRATION_INPUT_CONFIRM_MS) {
+      state.calibration.pendingInput = { keyIndex, travel, time: now, count: 1 };
+      continue;
+    }
+
+    state.calibration.pendingInput = {
+      keyIndex,
+      travel: Math.max(pending.travel, travel),
+      time: now,
+      count: pending.count + 1,
+    };
+    if (state.calibration.pendingInput.count < 2) {
+      continue;
+    }
 
     const previous = state.calibration.inputMax[keyIndex];
-    if (travel > previous) {
-      state.calibration.inputMax[keyIndex] = travel;
-      focusTrace(`calibration input max key=${keyIndex} travel=${travel}`);
+    const confirmedTravel = state.calibration.pendingInput.travel;
+    if (confirmedTravel > previous) {
+      state.calibration.inputMax[keyIndex] = confirmedTravel;
+      focusTrace(`calibration input max key=${keyIndex} travel=${confirmedTravel}`);
     }
   }
 }
@@ -977,6 +1021,47 @@ function featureIo(args) {
     }
   }
   return execFileSync(FEATURE_IO, args, { encoding: "utf8" }).trim();
+}
+
+async function macLikeSendFeature(devicePath, payload) {
+  await sleep(MAC_SEND_SETTLE_MS);
+  featureIo(["send", devicePath, payload.toString("hex")]);
+  await sleep(MAC_SEND_SETTLE_MS);
+}
+
+function isEmptyPayload(payload) {
+  return payload.every((byte) => byte === 0);
+}
+
+function hasCachedCalibrationPage(state) {
+  const page = Math.max(0, Math.min(3, state.lastMagnetismRead?.page ?? 0));
+  const baseKey = page * CALIBRATION_KEYS_PER_PAGE;
+  for (let slot = 0; slot < CALIBRATION_KEYS_PER_PAGE; slot += 1) {
+    if (state.calibration.inputMax[baseKey + slot] !== 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isTransientCalibrationRead(state, payload) {
+  const query = state.lastMagnetismRead;
+  return (
+    query?.kind === MAGNETISM_TRAVEL_VALUES &&
+    (isCalibrationControlEcho(payload) || (isEmptyPayload(payload) && hasCachedCalibrationPage(state)))
+  );
+}
+
+async function macLikeReadFeature(devicePath, state) {
+  let lastPayload = Buffer.alloc(0);
+  for (let attempt = 0; attempt < MAC_READ_POLL_ATTEMPTS; attempt += 1) {
+    await sleep(attempt === 0 ? MAC_SEND_SETTLE_MS : MAC_READ_POLL_MS);
+    lastPayload = Buffer.from(featureIo(["read", devicePath]), "hex");
+    if (!isTransientCalibrationRead(state, lastPayload)) {
+      return lastPayload;
+    }
+  }
+  return lastPayload;
 }
 
 function detectedDeviceId() {
@@ -1301,7 +1386,7 @@ async function responseFor(method, requestMessage) {
     const message = decodeSendMsg(requestMessage);
     try {
       const payload = normalizedPayload(message.payload, message.checksumType);
-      featureIo(["send", message.devicePath || DEFAULT_HIDRAW, payload.toString("hex")]);
+      await macLikeSendFeature(message.devicePath || DEFAULT_HIDRAW, payload);
       updateWriteState(message, payload);
       return {
         message: resSend(),
@@ -1315,8 +1400,8 @@ async function responseFor(method, requestMessage) {
   if (method === "readMsg" || method === "readRawFeature") {
     const message = decodeReadMsg(requestMessage);
     try {
-      const rawPayload = Buffer.from(featureIo(["read", message.devicePath || DEFAULT_HIDRAW]), "hex");
       const state = stateFor(message.devicePath);
+      const rawPayload = await macLikeReadFeature(message.devicePath || DEFAULT_HIDRAW, state);
       const heldPayload = monotonicCalibrationPayload(state, rawPayload);
       const payload = cachedCalibrationInputPayload(state, heldPayload);
       return {
