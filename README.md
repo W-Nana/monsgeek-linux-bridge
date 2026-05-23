@@ -112,6 +112,8 @@ The bridge is configured with environment variables:
 | `MONSGEEK_DB_FILE` | `~/.local/state/monsgeek-linux-bridge/db.json` | Override the local JSON DB path |
 | `MONSGEEK_FEATURE_IO` | `/tmp/hid-feature-io` | Override the compiled C HID helper path |
 | `MONSGEEK_LIVE_WEATHER` | unset | Set to `1` to call the same weather endpoint found in the macOS connector |
+| `MONSGEEK_CALIBRATION_INPUT_CACHE` | `1` | Cache hardware magnet travel events while `e5 fe` calibration reads are active |
+| `MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS` | `2500` | Time window for calibration travel max retention after the last `e5 fe` poll |
 | `MONSGEEK_ALLOW_OTA` | unset | Reserved. OTA still refuses even when set today |
 
 Example with explicit hidraw and verbose report logging:
@@ -241,12 +243,14 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
 - Macro assignment: assigning a temporary `Macro_1` produced a remap report
   beginning with `0a 00 53` and an additional macro payload beginning with
   `0b 00 00 38`.
-- Calibration: the official UI read travel data with `e5` reports, asked for
-  all physical keys to be pressed to the bottom, then sent a final `1e` report.
-  Repeated `e5 fe` polling stopped after confirmation. The experimental
-  read-payload max-hold shim is disabled by default because it can create ghost
-  travel values when the report layout is not confirmed; enable only for
-  diagnostics with `MONSGEEK_CALIBRATION_HOLD=1`.
+- Calibration: the official UI reads travel data with paged `e5 fe` reports.
+  On Linux, the feature read can return zeros while the keyboard still emits
+  real magnet travel on the vendor input hidraw stream. The bridge now keeps a
+  short-lived per-key maximum from those hardware events while `e5 fe` polling
+  is active, feeds that back through the paged `readMsg` response, and clears it
+  when the polling window ends. The older read-payload max-hold shim remains
+  disabled by default; enable only for diagnostics with
+  `MONSGEEK_CALIBRATION_HOLD=1`.
 
 ## Safety Notes
 

@@ -49,6 +49,13 @@ const FEA_CMD_GET_MAGNETISM_BY_ARR = 0xe5;
 const MAGNETISM_TRAVEL_VALUES = 0xfe;
 const VENDOR_INPUT_READER = process.env.MONSGEEK_VENDOR_INPUT_READER !== "0";
 const CALIBRATION_HOLD = process.env.MONSGEEK_CALIBRATION_HOLD === "1";
+const CALIBRATION_INPUT_CACHE = process.env.MONSGEEK_CALIBRATION_INPUT_CACHE !== "0";
+const CALIBRATION_INPUT_CACHE_TTL_MS = Number.parseInt(
+  process.env.MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS ?? "2500",
+  10,
+);
+const CALIBRATION_KEYS_PER_PAGE = 32;
+const CALIBRATION_MAX_KEYS = CALIBRATION_KEYS_PER_PAGE * 4;
 const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
 const SYNTHETIC_TRAVEL_MAX = Number.parseInt(process.env.MONSGEEK_SIM_TRAVEL_MAX ?? "400", 10);
 let microphoneMuted = false;
@@ -285,6 +292,7 @@ function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
         if (TRACE_HID_REPORTS || TRACE_FOCUS) {
           console.log(`vendor input ${devicePath} ${report.toString("hex")}`);
         }
+        noteVendorInputReport(report);
         broadcastStream("watchVender", venderMessage(report));
       }
     }, 10),
@@ -584,6 +592,11 @@ function stateFor(devicePath) {
         maximum: false,
         travelReads: 0,
         maxPages: new Map(),
+        inputMax: new Uint16Array(CALIBRATION_MAX_KEYS),
+        inputActiveUntil: 0,
+        inputReportPath: undefined,
+        inputReportOwned: false,
+        inputReportTimer: undefined,
       },
       magnetismReport: {
         active: false,
@@ -630,7 +643,7 @@ function updateWriteState(message, report) {
     state.calibration.active = report[1] !== 0;
     focusTrace(`calibration ${state.calibration.active ? "on" : "off"} cmd=1c path=${message.devicePath}`);
     if (state.calibration.active) {
-      state.calibration.maxPages.clear();
+      resetCalibrationCache(state);
     } else {
       resetCalibrationState(state);
     }
@@ -638,13 +651,14 @@ function updateWriteState(message, report) {
     state.calibration.maximum = report[1] !== 0;
     focusTrace(`calibration maximum ${state.calibration.maximum ? "on" : "off"} cmd=1e path=${message.devicePath}`);
     if (state.calibration.maximum) {
-      state.calibration.maxPages.clear();
+      resetCalibrationCache(state);
     } else {
       resetCalibrationState(state);
     }
   } else if (report[0] === FEA_CMD_GET_MAGNETISM_BY_ARR) {
     state.calibration.travelReads += 1;
     state.lastMagnetismRead = { kind: report[1], page: report[3] };
+    noteCalibrationTravelRead(state, report[1], message.devicePath);
     focusTrace(`magnetism read cmd=e5 kind=0x${report[1].toString(16)} page=${report[3]} path=${message.devicePath}`);
   }
 }
@@ -707,8 +721,162 @@ function resetCalibrationState(state) {
   state.calibration.active = false;
   state.calibration.maximum = false;
   state.calibration.travelReads = 0;
-  state.calibration.maxPages.clear();
+  resetCalibrationCache(state);
   state.lastMagnetismRead = undefined;
+}
+
+function resetCalibrationCache(state) {
+  state.calibration.maxPages.clear();
+  state.calibration.inputMax.fill(0);
+  state.calibration.inputActiveUntil = 0;
+  stopCalibrationInputReport(state);
+}
+
+function noteCalibrationTravelRead(state, kind, devicePath) {
+  if (!CALIBRATION_INPUT_CACHE || kind !== MAGNETISM_TRAVEL_VALUES) {
+    return;
+  }
+
+  const now = Date.now();
+  if (now > state.calibration.inputActiveUntil) {
+    state.calibration.inputMax.fill(0);
+  }
+  state.calibration.inputActiveUntil = now + CALIBRATION_INPUT_CACHE_TTL_MS;
+  ensureCalibrationInputReport(state, devicePath);
+}
+
+function calibrationReportPayload(enabled) {
+  return normalizedPayload(
+    Buffer.from([FEA_CMD_SET_MAGNETISM_REPORT, enabled ? 1 : 0, 0, 0, 0, 0, 0, 0]),
+    CHECKSUM_BIT7,
+  );
+}
+
+function ensureCalibrationInputReport(state, devicePath) {
+  const target = devicePath || DEFAULT_HIDRAW;
+  startVendorInputReaders();
+
+  if (!state.magnetismReport.active) {
+    try {
+      featureIo(["send", target, calibrationReportPayload(true).toString("hex")]);
+      state.magnetismReport.active = true;
+      state.calibration.inputReportPath = target;
+      state.calibration.inputReportOwned = true;
+      focusTrace(`calibration input report on path=${target}`);
+    } catch (error) {
+      focusTrace(`calibration input report on failed path=${target}: ${error.message}`);
+    }
+  }
+
+  if (state.calibration.inputReportTimer) {
+    clearTimeout(state.calibration.inputReportTimer);
+  }
+  state.calibration.inputReportTimer = setTimeout(() => {
+    if (Date.now() <= state.calibration.inputActiveUntil) {
+      return;
+    }
+    stopCalibrationInputReport(state);
+  }, CALIBRATION_INPUT_CACHE_TTL_MS + 250);
+}
+
+function stopCalibrationInputReport(state) {
+  if (state.calibration.inputReportTimer) {
+    clearTimeout(state.calibration.inputReportTimer);
+    state.calibration.inputReportTimer = undefined;
+  }
+
+  if (!state.calibration.inputReportOwned || !state.calibration.inputReportPath || !state.magnetismReport.active) {
+    state.calibration.inputReportPath = undefined;
+    state.calibration.inputReportOwned = false;
+    return;
+  }
+
+  try {
+    featureIo(["send", state.calibration.inputReportPath, calibrationReportPayload(false).toString("hex")]);
+    focusTrace(`calibration input report off path=${state.calibration.inputReportPath}`);
+  } catch (error) {
+    focusTrace(`calibration input report off failed path=${state.calibration.inputReportPath}: ${error.message}`);
+  }
+  state.magnetismReport.active = false;
+  state.calibration.inputReportPath = undefined;
+  state.calibration.inputReportOwned = false;
+}
+
+function noteVendorInputReport(report) {
+  if (!CALIBRATION_INPUT_CACHE) {
+    return;
+  }
+
+  const offset =
+    report.length >= 5 && report[1] === FEA_CMD_SET_MAGNETISM_REPORT
+      ? 1
+      : report.length >= 4 && report[0] === FEA_CMD_SET_MAGNETISM_REPORT
+        ? 0
+        : -1;
+  if (offset < 0) {
+    return;
+  }
+
+  const travel = report.readUInt16LE(offset + 1);
+  if (travel === 0) {
+    return;
+  }
+
+  const keyIndex = report[offset + 3];
+  if (keyIndex >= CALIBRATION_MAX_KEYS) {
+    return;
+  }
+
+  const now = Date.now();
+  for (const state of deviceStates.values()) {
+    if (now > state.calibration.inputActiveUntil) {
+      continue;
+    }
+
+    const previous = state.calibration.inputMax[keyIndex];
+    if (travel > previous) {
+      state.calibration.inputMax[keyIndex] = travel;
+      focusTrace(`calibration input max key=${keyIndex} travel=${travel}`);
+    }
+  }
+}
+
+function cachedCalibrationInputPayload(state, payload) {
+  const query = state.lastMagnetismRead;
+  if (
+    !CALIBRATION_INPUT_CACHE ||
+    !query ||
+    query.kind !== MAGNETISM_TRAVEL_VALUES ||
+    payload.length < 2 ||
+    Date.now() > state.calibration.inputActiveUntil
+  ) {
+    return payload;
+  }
+
+  const page = Math.max(0, Math.min(3, query.page ?? 0));
+  const nextPayload = Buffer.from(payload);
+  let changed = false;
+  const baseKey = page * CALIBRATION_KEYS_PER_PAGE;
+  const slots = Math.min(CALIBRATION_KEYS_PER_PAGE, Math.floor(payload.length / 2));
+  for (let slot = 0; slot < slots; slot += 1) {
+    const offset = slot * 2;
+    const cached = state.calibration.inputMax[baseKey + slot];
+    if (cached === 0) {
+      continue;
+    }
+
+    const raw = payload.readUInt16LE(offset);
+    if (cached > raw) {
+      nextPayload.writeUInt16LE(cached, offset);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    focusTrace(`calibration input cache page=${page} ${hidTrace(nextPayload)}`);
+    return nextPayload;
+  }
+  return payload;
 }
 
 function monotonicCalibrationPayload(state, payload) {
@@ -1103,7 +1271,8 @@ async function responseFor(method, requestMessage) {
     try {
       const rawPayload = Buffer.from(featureIo(["read", message.devicePath || DEFAULT_HIDRAW]), "hex");
       const state = stateFor(message.devicePath);
-      const payload = monotonicCalibrationPayload(state, rawPayload);
+      const heldPayload = monotonicCalibrationPayload(state, rawPayload);
+      const payload = cachedCalibrationInputPayload(state, heldPayload);
       return {
         message: resRead(payload),
         note: `${method} ${payload === rawPayload ? "" : "calibration-max "} ${hidTrace(payload)}`,
