@@ -261,9 +261,9 @@ These flows were exercised through the official web UI on the current FUN60 PRO:
   `0b 00 00 38`.
 - Calibration: the official UI reads travel data with paged `e5 fe` reports.
   On Linux, the feature read can return zeros while the keyboard still emits
-  real magnet travel on the vendor input hidraw stream. The bridge now keeps a
-  short-lived per-key maximum from those hardware events while `e5 fe` polling
-  is active, starts the vendor travel stream only after an actual boot-keyboard
+  real magnet travel on the vendor input hidraw stream. The bridge now only
+  preserves per-key maxima during the second calibration screen (`1e` / maximum
+  mode), starts the vendor travel stream only after an actual boot-keyboard
   press report, locks each physical press to one dominant vendor key candidate,
   requires two same-key samples before accepting a max update, feeds that back
   through the paged `readMsg` response, and clears it when the polling window

@@ -843,7 +843,7 @@ function selectCalibrationPressKey(state, keyIndex, travel, now) {
 }
 
 function noteCalibrationTravelRead(state, kind, devicePath) {
-  if (!CALIBRATION_INPUT_CACHE || kind !== MAGNETISM_TRAVEL_VALUES) {
+  if (!CALIBRATION_INPUT_CACHE || kind !== MAGNETISM_TRAVEL_VALUES || !state.calibration.maximum) {
     return;
   }
 
@@ -938,7 +938,7 @@ function noteVendorInputReport(report) {
   }
 
   for (const state of deviceStates.values()) {
-    if (now > state.calibration.inputActiveUntil) {
+    if (!state.calibration.maximum || now > state.calibration.inputActiveUntil) {
       continue;
     }
     if (now < state.calibration.inputIgnoreUntil) {
@@ -993,7 +993,7 @@ function notePhysicalKeyboardInput(report) {
   }
 
   for (const state of deviceStates.values()) {
-    if (now <= state.calibration.inputActiveUntil) {
+    if (state.calibration.maximum && now <= state.calibration.inputActiveUntil) {
       if (changed) {
         beginCalibrationPress(state, now);
       }
@@ -1032,6 +1032,7 @@ function cachedCalibrationInputPayload(state, payload) {
   const cleanPayload = isCalibrationControlEcho(payload) ? Buffer.alloc(payload.length) : payload;
   if (
     !CALIBRATION_INPUT_CACHE ||
+    !state.calibration.maximum ||
     !query ||
     query.kind !== MAGNETISM_TRAVEL_VALUES ||
     cleanPayload.length < 2 ||
