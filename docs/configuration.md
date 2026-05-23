@@ -6,6 +6,7 @@ The bridge is configured with environment variables.
 | --- | --- | --- |
 | `MONSGEEK_HIDRAW` | auto-detected, fallback `/dev/hidraw4` | Override the Linux hidraw endpoint |
 | `MONSGEEK_VENDOR_HIDRAWS` | all MonsGeek `3151:502d` hidraw nodes | Comma-separated hidraw nodes to monitor for vendor/input events |
+| `MONSGEEK_ALLOWED_ORIGINS` | `https://web.monsgeek.com,https://app.monsgeek.com` | Comma-separated browser origins allowed by CORS |
 | `MONSGEEK_DEVICE_ID` | read from keyboard with `GET_INFOR` | Override the web-driver device ID while testing |
 | `MONSGEEK_TRACE_HID` | unset | Set to `1` to log full 64-byte HID reports |
 | `MONSGEEK_TRACE_FOCUS` | unset | Set to `1` to log only vendor-input and magnet calibration/simulation events |

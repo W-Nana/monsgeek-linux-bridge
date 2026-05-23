@@ -57,10 +57,11 @@ Start the local connector:
 ./target/release/monsgeek-linux-bridge
 ```
 
-Open the official web driver:
+Open one of the official web drivers:
 
 ```text
 https://web.monsgeek.com
+https://app.monsgeek.com
 ```
 
 If Chrome asks for local network access, allow it. Without that permission the

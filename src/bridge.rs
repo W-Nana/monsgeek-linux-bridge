@@ -33,6 +33,7 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 struct Config {
     default_hidraw: String,
     vendor_hidraws: Vec<String>,
+    allowed_origins: Vec<String>,
     db_file: PathBuf,
     trace_hid: bool,
     trace_focus: bool,
@@ -190,6 +191,7 @@ pub async fn run() -> Result<()> {
         config: Config {
             default_hidraw,
             vendor_hidraws,
+            allowed_origins: allowed_origins(),
             db_file,
             trace_hid: env_flag("MONSGEEK_TRACE_HID"),
             trace_focus: env_flag("MONSGEEK_TRACE_FOCUS"),
@@ -243,15 +245,24 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn options_handler() -> impl IntoResponse {
-    (StatusCode::NO_CONTENT, headers("text/plain"), "")
+async fn options_handler(
+    axum::extract::State(app): axum::extract::State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        response_headers("text/plain", request_origin(&headers), &app.config),
+        "",
+    )
 }
 
 async fn post_handler(
     axum::extract::State(app): axum::extract::State<Arc<AppState>>,
     Path(method): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let origin = request_origin(&headers);
     let request = decode_grpc_text_body(&body);
     let result = match method.as_str() {
         "watchDevList" => Ok(ResponseResult::ok(
@@ -260,10 +271,10 @@ async fn post_handler(
         )),
         "watchVender" => {
             start_vendor_input_readers(app.clone()).await;
-            return vendor_stream_response(app).await;
+            return vendor_stream_response(app, origin).await;
         }
         "watchSystemInfo" => Ok(ResponseResult::ok(system_info_message(), "stream")),
-        _ => response_for(app, method.as_str(), &request).await,
+        _ => response_for(app.clone(), method.as_str(), &request).await,
     }
     .unwrap_or_else(|error| ResponseResult {
         message: Vec::new(),
@@ -275,13 +286,13 @@ async fn post_handler(
     println!("POST /driver.DriverGrpc/{method} -> {}", result.note);
     (
         StatusCode::OK,
-        headers("application/grpc-web-text"),
+        response_headers("application/grpc-web-text", origin, &app.config),
         grpc_text_response(&result.message, result.status, &result.status_message),
     )
         .into_response()
 }
 
-async fn vendor_stream_response(app: Arc<AppState>) -> Response {
+async fn vendor_stream_response(app: Arc<AppState>, origin: Option<&str>) -> Response {
     println!("POST /driver.DriverGrpc/watchVender -> vendor event stream");
     let receiver = app.vendor_events.subscribe();
     let initial = tokio_stream::once(Ok::<Bytes, std::convert::Infallible>(Bytes::from(
@@ -295,7 +306,7 @@ async fn vendor_stream_response(app: Arc<AppState>) -> Response {
     });
     (
         StatusCode::OK,
-        headers("application/grpc-web-text"),
+        response_headers("application/grpc-web-text", origin, &app.config),
         Body::from_stream(initial.chain(events)),
     )
         .into_response()
@@ -476,6 +487,26 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn allowed_origins() -> Vec<String> {
+    env::var("MONSGEEK_ALLOWED_ORIGINS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .filter(|origins: &Vec<String>| !origins.is_empty())
+        .unwrap_or_else(|| {
+            DEFAULT_ALLOWED_ORIGINS
+                .iter()
+                .map(|origin| origin.to_string())
+                .collect()
+        })
+}
+
 fn detected_hidraw() -> String {
     if let Ok(path) = env::var("MONSGEEK_HIDRAW") {
         return path;
@@ -575,7 +606,15 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-fn headers(content_type: &str) -> HeaderMap {
+fn request_origin(headers: &HeaderMap) -> Option<&str> {
+    headers.get("origin").and_then(|value| value.to_str().ok())
+}
+
+fn response_headers(
+    content_type: &str,
+    request_origin: Option<&str>,
+    config: &Config,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         "access-control-allow-credentials",
@@ -593,10 +632,12 @@ fn headers(content_type: &str) -> HeaderMap {
         "access-control-allow-private-network",
         HeaderValue::from_static("true"),
     );
-    headers.insert(
-        "access-control-allow-origin",
-        HeaderValue::from_static(WEB_ORIGIN),
-    );
+    if let Some(origin) = allowed_origin(request_origin, config) {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            headers.insert("access-control-allow-origin", value);
+        }
+    }
+    headers.insert("vary", HeaderValue::from_static("Origin"));
     headers.insert(
         "access-control-expose-headers",
         HeaderValue::from_static("grpc-status,grpc-message,grpc-status-details-bin"),
@@ -607,6 +648,15 @@ fn headers(content_type: &str) -> HeaderMap {
         HeaderValue::from_static("nosniff"),
     );
     headers
+}
+
+fn allowed_origin<'a>(request_origin: Option<&'a str>, config: &'a Config) -> Option<&'a str> {
+    let origin = request_origin?;
+    config
+        .allowed_origins
+        .iter()
+        .any(|allowed| allowed == origin)
+        .then_some(origin)
 }
 
 struct SendMsg {

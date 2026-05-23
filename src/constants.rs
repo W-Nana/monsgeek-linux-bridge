@@ -1,6 +1,7 @@
 pub const HOST: &str = "127.0.0.1";
 pub const PORT: u16 = 3814;
-pub const WEB_ORIGIN: &str = "https://web.monsgeek.com";
+pub const DEFAULT_ALLOWED_ORIGINS: &[&str] =
+    &["https://web.monsgeek.com", "https://app.monsgeek.com"];
 pub const HIDRAW_SYSFS: &str = "/sys/class/hidraw";
 pub const MONSGEEK_VENDOR: &str = "3151";
 pub const MONSGEEK_PRODUCT: &str = "502d";

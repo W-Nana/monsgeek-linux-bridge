@@ -5,7 +5,7 @@ use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const ORIGIN: &str = "https://web.monsgeek.com";
+const DEFAULT_ORIGIN: &str = "https://app.monsgeek.com";
 const METHODS: &[(&str, Payload)] = &[
     ("getVersion", Payload::Empty),
     ("watchDevList", Payload::Empty),
@@ -51,6 +51,7 @@ pub async fn run() -> Result<()> {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(3814);
+    let origin = env::var("MONSGEEK_SMOKE_ORIGIN").unwrap_or_else(|_| DEFAULT_ORIGIN.into());
     let mut failed = false;
 
     for (method, payload) in METHODS {
@@ -60,18 +61,22 @@ pub async fn run() -> Result<()> {
             method,
             &payload_bytes(*payload),
             is_streaming(method),
+            &origin,
         )
         .await?;
-        let ok = response.http_status == 200 && response.grpc_status == Some(0);
+        let ok = response.http_status == 200
+            && response.grpc_status == Some(0)
+            && response.allow_origin.as_deref() == Some(origin.as_str());
         failed |= !ok;
         println!(
-            "{} {method} http={} grpc={} bytes={}",
+            "{} {method} http={} grpc={} cors={} bytes={}",
             if ok { "ok" } else { "FAIL" },
             response.http_status,
             response
                 .grpc_status
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "missing".into()),
+            response.allow_origin.as_deref().unwrap_or("missing"),
             response.message_bytes
         );
     }
@@ -85,6 +90,7 @@ pub async fn run() -> Result<()> {
 struct SmokeResponse {
     http_status: u16,
     grpc_status: Option<u32>,
+    allow_origin: Option<String>,
     message_bytes: usize,
 }
 
@@ -94,6 +100,7 @@ async fn call(
     method: &str,
     payload: &[u8],
     streaming: bool,
+    origin: &str,
 ) -> Result<SmokeResponse> {
     let body = STANDARD.encode(grpc_frame(0, payload));
     let request = format!(
@@ -101,7 +108,7 @@ async fn call(
 Host: {host}:{port}\r\n\
 Content-Type: application/grpc-web-text\r\n\
 Content-Length: {}\r\n\
-Origin: {ORIGIN}\r\n\
+Origin: {origin}\r\n\
 X-Grpc-Web: 1\r\n\
 Connection: close\r\n\
 \r\n\
@@ -171,6 +178,7 @@ fn parse_response(response: &[u8]) -> Result<SmokeResponse> {
     Ok(SmokeResponse {
         http_status: status,
         grpc_status,
+        allow_origin: header_value(&header, "access-control-allow-origin"),
         message_bytes: first_message.unwrap_or(0),
     })
 }
@@ -200,8 +208,17 @@ fn first_message_response(response: &[u8]) -> Result<Option<SmokeResponse>> {
     Ok(Some(SmokeResponse {
         http_status: status,
         grpc_status: Some(0),
+        allow_origin: header_value(&header, "access-control-allow-origin"),
         message_bytes: len,
     }))
+}
+
+fn header_value(header: &str, name: &str) -> Option<String> {
+    header.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_string())
+    })
 }
 
 fn http_body_bytes(header: &str, body: &[u8]) -> Vec<u8> {
