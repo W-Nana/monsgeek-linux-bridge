@@ -54,6 +54,10 @@ const CALIBRATION_INPUT_CACHE_TTL_MS = Number.parseInt(
   process.env.MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS ?? "2500",
   10,
 );
+const CALIBRATION_PHYSICAL_INPUT_GRACE_MS = Number.parseInt(
+  process.env.MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS ?? "700",
+  10,
+);
 const CALIBRATION_KEYS_PER_PAGE = 32;
 const CALIBRATION_MAX_KEYS = CALIBRATION_KEYS_PER_PAGE * 4;
 const SYNTHETIC_SIMULATION = process.env.MONSGEEK_SYNTHETIC_SIMULATION === "1";
@@ -66,6 +70,7 @@ const streamClients = {
   watchSystemInfo: new Set(),
 };
 const vendorInputReaders = new Map();
+let physicalKeyboardInputActiveUntil = 0;
 
 function focusTrace(message) {
   if (TRACE_FOCUS) {
@@ -292,6 +297,7 @@ function startVendorInputReader(devicePath = DEFAULT_HIDRAW) {
         if (TRACE_HID_REPORTS || TRACE_FOCUS) {
           console.log(`vendor input ${devicePath} ${report.toString("hex")}`);
         }
+        notePhysicalKeyboardInput(report);
         noteVendorInputReport(report);
         if (shouldForwardVendorInputReport(report)) {
           broadcastStream("watchVender", venderMessage(report));
@@ -825,6 +831,10 @@ function noteVendorInputReport(report) {
   }
 
   const now = Date.now();
+  if (now > physicalKeyboardInputActiveUntil) {
+    return;
+  }
+
   for (const state of deviceStates.values()) {
     if (now > state.calibration.inputActiveUntil) {
       continue;
@@ -836,6 +846,19 @@ function noteVendorInputReport(report) {
       focusTrace(`calibration input max key=${keyIndex} travel=${travel}`);
     }
   }
+}
+
+function notePhysicalKeyboardInput(report) {
+  if (!isBootKeyboardInputReport(report)) {
+    return;
+  }
+
+  const hasPressedKey = report.some((byte) => byte !== 0);
+  physicalKeyboardInputActiveUntil = hasPressedKey ? Date.now() + CALIBRATION_PHYSICAL_INPUT_GRACE_MS : 0;
+}
+
+function isBootKeyboardInputReport(report) {
+  return report.length === 8 && magnetTravelReportOffset(report) < 0;
 }
 
 function magnetTravelReportOffset(report) {

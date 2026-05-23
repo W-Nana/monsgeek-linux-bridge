@@ -114,6 +114,7 @@ The bridge is configured with environment variables:
 | `MONSGEEK_LIVE_WEATHER` | unset | Set to `1` to call the same weather endpoint found in the macOS connector |
 | `MONSGEEK_CALIBRATION_INPUT_CACHE` | `1` | Cache hardware magnet travel events while `e5 fe` calibration reads are active |
 | `MONSGEEK_CALIBRATION_INPUT_CACHE_TTL_MS` | `2500` | Time window for calibration travel max retention after the last `e5 fe` poll |
+| `MONSGEEK_CALIBRATION_PHYSICAL_INPUT_GRACE_MS` | `700` | Require a nearby boot-keyboard input report before accepting calibration travel |
 | `MONSGEEK_ALLOW_OTA` | unset | Reserved. OTA still refuses even when set today |
 
 Example with explicit hidraw and verbose report logging:
