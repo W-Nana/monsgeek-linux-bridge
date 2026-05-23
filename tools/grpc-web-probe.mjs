@@ -88,7 +88,7 @@ function usbParent(start) {
     const vendor = readSysfsText(join(current, "idVendor"));
     const product = readSysfsText(join(current, "idProduct"));
     if (vendor && product) {
-      return { vendor: vendor.toLowerCase(), product: product.toLowerCase() };
+      return { path: current, vendor: vendor.toLowerCase(), product: product.toLowerCase() };
     }
 
     const parent = dirname(current);
@@ -138,6 +138,36 @@ function detectedHidraw() {
 }
 
 const DEFAULT_HIDRAW = detectedHidraw();
+
+function allMonsGeekHidraws() {
+  if (process.env.MONSGEEK_VENDOR_HIDRAWS) {
+    return process.env.MONSGEEK_VENDOR_HIDRAWS.split(",")
+      .map((path) => path.trim())
+      .filter(Boolean);
+  }
+
+  const paths = [];
+  try {
+    for (const name of readdirSync(HIDRAW_SYSFS).sort()) {
+      if (!name.startsWith("hidraw")) {
+        continue;
+      }
+
+      const sysfs = realpathSync(join(HIDRAW_SYSFS, name, "device"));
+      const usb = usbParent(sysfs);
+      if (usb?.vendor === MONSGEEK_VENDOR && usb.product === MONSGEEK_PRODUCT) {
+        paths.push(`/dev/${name}`);
+      }
+    }
+  } catch {
+    // Fall back to the detected feature endpoint.
+  }
+
+  if (!paths.includes(DEFAULT_HIDRAW)) {
+    paths.push(DEFAULT_HIDRAW);
+  }
+  return paths;
+}
 
 function encodeVarint(value) {
   const bytes = [];
@@ -274,6 +304,13 @@ function stopVendorInputReaders() {
     }
     vendorInputReaders.delete(devicePath);
   }
+}
+
+function startVendorInputReaders() {
+  for (const devicePath of allMonsGeekHidraws()) {
+    startVendorInputReader(devicePath);
+  }
+  focusTrace(`watchVender input reader paths=${[...vendorInputReaders.keys()].join(",") || "none"}`);
 }
 
 function requestPayload(body) {
@@ -581,7 +618,7 @@ function updateWriteState(message, report) {
     state.magnetismReport.active = report[1] !== 0;
     focusTrace(`magnetism report ${state.magnetismReport.active ? "on" : "off"} path=${message.devicePath}`);
     if (state.magnetismReport.active) {
-      startVendorInputReader(message.devicePath || DEFAULT_HIDRAW);
+      startVendorInputReaders();
     }
     if (state.magnetismReport.active && SYNTHETIC_SIMULATION) {
       startMagnetismReport(message.devicePath, state);
@@ -1115,7 +1152,7 @@ const server = http.createServer((request, response) => {
     }
     if (method === "watchVender") {
       console.log(`${request.method} ${request.url} ${payload} -> vendor event stream`);
-      startVendorInputReader(DEFAULT_HIDRAW);
+      startVendorInputReaders();
       attachStream(method, response, () => {
         const firstState = deviceStates.values().next().value;
         return venderMessage(firstState ? venderLightPayload(firstState.light) : Buffer.alloc(0));
