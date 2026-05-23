@@ -11,10 +11,6 @@ issues Linux `HIDIOCSFEATURE` and `HIDIOCGFEATURE` ioctls directly against the
 vendor configuration hidraw endpoint. Vendor/input reports are consumed through
 an event-driven Tokio `AsyncFd` reader.
 
-The earlier Node.js prototype remains in `tools/grpc-web-probe.mjs` as a
-reference and fallback while more keyboards are tested, but it is no longer the
-preferred runtime.
-
 The Rust bridge removes the two largest prototype shortcuts:
 
 - HID feature reports are handled in-process. There is no per-request fork/exec

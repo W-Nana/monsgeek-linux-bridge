@@ -72,7 +72,7 @@ running.
 With the bridge running, execute the smoke test:
 
 ```sh
-node tools/grpc-smoke-test.mjs
+./target/release/monsgeek-linux-bridge smoke-test
 ```
 
 Expected result: all 21 methods return HTTP 200 and `grpc-status: 0`.
@@ -81,7 +81,7 @@ For a dry API-only smoke test without a real hidraw device:
 
 ```sh
 MONSGEEK_DEVICE_ID=2304 MONSGEEK_HIDRAW=/dev/null ./target/release/monsgeek-linux-bridge
-MONSGEEK_HIDRAW=/dev/null node tools/grpc-smoke-test.mjs
+MONSGEEK_HIDRAW=/dev/null ./target/release/monsgeek-linux-bridge smoke-test
 ```
 
 The HID send/read methods will report ioctl errors inside their protobuf
@@ -102,11 +102,6 @@ payloads, but the gRPC-Web compatibility surface should still pass.
 src/main.rs                    thin Rust binary entrypoint
 src/bridge.rs                  Rust local gRPC-Web connector
 docs/                          split project documentation
-tools/grpc-smoke-test.mjs      21-method API smoke test
-tools/grpc-web-probe.mjs       legacy Node.js prototype / fallback connector
-tools/hid-sysfs-probe.mjs      Linux hidraw/sysfs inspector
-tools/hid-feature-io.c         legacy prototype HID feature-report helper
-tools/hid-feature-version.c    narrow GET_REV feature-report test
 udev/99-monsgeek-hidraw.rules  udev rule for 3151:502d
 ```
 
@@ -115,6 +110,7 @@ Useful subcommands:
 ```sh
 ./target/release/monsgeek-linux-bridge --help
 ./target/release/monsgeek-linux-bridge print-udev-rule
+./target/release/monsgeek-linux-bridge smoke-test
 sudo ./target/release/monsgeek-linux-bridge install-udev
 ```
 
